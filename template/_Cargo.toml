@@ -1,5 +1,5 @@
 [package]
-name = "{{}}"
+name = "{{name}}"
 version = "0.1.0"
 authors = ["[your_name] <you_email>"]
 edition = "2018"
@@ -18,7 +18,8 @@ liquid_ty_mapping = { version = "0.1.0", git = "https://github.com/vita-dounai/l
 liquid_prelude = { version = "0.1.0",  git = "https://github.com/vita-dounai/liquid", branch = "dev", package = "liquid_prelude", default-features = false }
 
 [lib]
-name = "{{}}"
+name = "{{name}}"
+path = "lib.rs"
 crate-type = [
     # Used for normal contract Wasm blobs.
     "cdylib",

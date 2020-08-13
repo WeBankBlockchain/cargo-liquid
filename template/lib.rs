@@ -9,13 +9,13 @@ mod {{name}} {
     /// Defines the storage of your contract.
     #[liquid(storage)]
     struct {{camel_name}} {
-        /// Add new fields to the below struct in order
-        /// to add new static storage fields to your contract.
+        // Add new fields here in order to add new 
+        // static storage fields to your contract.
     }
 
     /// Defines the methods of your contract.
     #[liquid(methods)]
-    struct {{camel_name}} {
+    impl {{camel_name}} {
         /// Constructor that initializes your storage.
         /// The name of constructor must be `new`;
         /// The receiver of constructor must be `&mut self`.
