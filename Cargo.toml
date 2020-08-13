@@ -1,0 +1,13 @@
+[package]
+name = "cargo-liquid"
+version = "0.1.0"
+authors = ["vita-dounai <lichenxi.webank@gmail.com>"]
+build = "build.rs"
+edition = "2018"
+
+[dependencies]
+
+[build-dependencies]
+anyhow = "1.0.32"
+zip = "0.5.6"
+walkdir = "2.3.1"
