@@ -10,12 +10,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Result;
-use colored::Colorize;
-use std::path::PathBuf;
-use structopt::{clap, StructOpt};
-
 mod cmd;
+mod utils;
+mod workspace;
+
+use anyhow::{Error, Result};
+use colored::Colorize;
+use std::{
+    convert::{TryFrom, TryInto},
+    path::PathBuf,
+};
+use structopt::{clap, StructOpt};
 
 #[derive(StructOpt)]
 #[structopt(bin_name = "cargo")]
@@ -35,7 +40,34 @@ pub(crate) struct ContractArgs {
 }
 
 #[derive(StructOpt)]
+struct VerbosityFlags {
+    #[structopt(long)]
+    quiet: bool,
+    #[structopt(long)]
+    verbose: bool,
+}
+
+enum Verbosity {
+    Quiet,
+    Verbose,
+}
+
+impl TryFrom<&VerbosityFlags> for Option<Verbosity> {
+    type Error = Error;
+
+    fn try_from(value: &VerbosityFlags) -> Result<Self, Self::Error> {
+        match (value.quiet, value.verbose) {
+            (true, false) => Ok(Some(Verbosity::Quiet)),
+            (false, false) => Ok(Some(Verbosity::Quiet)),
+            (false, true) => Ok(Some(Verbosity::Verbose)),
+            (true, true) => anyhow::bail!("Cannot pass bot --quiet and --verbose flags"),
+        }
+    }
+}
+
+#[derive(StructOpt)]
 enum Command {
+    /// Setup and create a new smart contract project
     #[structopt(name = "new")]
     New {
         /// The name of the newly created smart contract
@@ -44,12 +76,18 @@ enum Command {
         #[structopt(short, long, parse(from_os_str))]
         target_dir: Option<PathBuf>,
     },
+    /// Compiles the smart contract
+    #[structopt(name = "build")]
+    Build {
+        #[structopt(flatten)]
+        verbosity: VerbosityFlags,
+    },
 }
 
 fn main() {
     let Opts::Contract(args) = Opts::from_args();
     match exec(args.cmd) {
-        Ok(msg) => println!("\t{}", msg),
+        Ok(msg) => println!("\t{}", msg.bright_green().bold()),
         Err(err) => eprintln!("{} {}", "ERROR:".bright_red().bold(), format!("{:?}", err)),
     }
 }
@@ -57,5 +95,8 @@ fn main() {
 fn exec(cmd: Command) -> Result<String> {
     match &cmd {
         Command::New { name, target_dir } => cmd::execute_new(name, target_dir.as_ref()),
+        Command::Build { verbosity } => {
+            cmd::execute_build(Default::default(), verbosity.try_into()?)
+        }
     }
 }

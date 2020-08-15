@@ -10,6 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod build;
 mod new;
 
-pub(crate) use self::new::execute_new;
+pub(crate) use self::{build::execute_build, new::execute_new};
