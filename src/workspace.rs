@@ -103,6 +103,17 @@ impl Manifest {
         Ok(self)
     }
 
+    /// Add a value to the `[lib] crate-types = []` section.
+    ///
+    /// If the value already exists, does nothing.
+    pub fn with_added_crate_type(&mut self, crate_type: &str) -> Result<&mut Self> {
+        let crate_types = self.get_crate_types_mut()?;
+        if !crate_type_exists(crate_type, crate_types) {
+            crate_types.push(crate_type.into());
+        }
+        Ok(self)
+    }
+
     /// Set `[profile.release]` lto flag
     pub fn with_profile_release_lto(&mut self, enabled: bool) -> Result<&mut Self> {
         let profile = self
@@ -169,7 +180,7 @@ impl Manifest {
         let abs_path = self.path.as_ref().canonicalize()?;
         let abs_dir = abs_path
             .parent()
-            .expect("The manifest path is a file path so has a parent; qed");
+            .expect("The manifest path is a file path so has a parent");
 
         let to_absolute = |value_id: String, existing_path: &mut value::Value| -> Result<()> {
             let path_str = existing_path

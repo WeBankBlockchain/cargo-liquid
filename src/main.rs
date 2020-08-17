@@ -87,7 +87,7 @@ enum Command {
 fn main() {
     let Opts::Contract(args) = Opts::from_args();
     match exec(args.cmd) {
-        Ok(msg) => println!("\t{}", msg.bright_green().bold()),
+        Ok(msg) => println!("{}", msg.bold()),
         Err(err) => eprintln!("{} {}", "ERROR:".bright_red().bold(), format!("{:?}", err)),
     }
 }
