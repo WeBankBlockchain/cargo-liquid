@@ -77,7 +77,7 @@ pub(crate) fn execute_new(name: &str, dir: Option<&PathBuf>) -> Result<String> {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionExt;
+            use std::os::unix::fs::PermissionsExt;
 
             if let Some(mode) = file.unix_mode() {
                 fs::set_permissions(&out_path, fs::Permissions::from_mode(mode))?
