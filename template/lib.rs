@@ -60,7 +60,7 @@ mod {{name}} {
             // call them in test code as if they were normal Rust constructors
             // that take no `self` argument but return `Self`.
             let contract = {{camel_name}}::new();
-            assert_eq!(contract.get(), String::from("{{name}}"));
+            assert_eq!(contract.get(), String::from("Alice"));
         }
 
         /// We test if `set` method does its job.
@@ -72,8 +72,7 @@ mod {{name}} {
             // the variable name to declare that it's mutable.
             let mut contract = {{camel_name}}::new();
 
-            let mut new_name = String::from("Hello, ");
-            new_name.push_str("{{name}}");
+            let mut new_name = String::from("Bob");
 
             // Note that `set` method will take the ownership of `new_name`
             // we provided above, and then `new_name` will be invalid and

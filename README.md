@@ -1,12 +1,19 @@
 # cargo-liquid
 
-# Usage
+## Prerequisite
 
 ```bash
+rustup toolchain install nightly
+
 git clone https://github.com/vita-dounai/cargo-liquid
 cd cargo-liquid
 cargo install --path . --force
-cargo liquid new hello-world
-cd hello-world
-cargo liquid build
+```
+
+## Usage
+
+```bash
+cargo liquid new hello_world
+cd hello_world
+cargo +nightly liquid build
 ```
