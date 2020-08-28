@@ -165,7 +165,7 @@ fn optimize_wasm(crate_metadata: &CrateMetadata) -> Result<()> {
     //
     // In practice only tree-shaking is performed, i.e transitively removing all symbols that are
     // NOT used by the specified entrypoints.
-    if pwasm_utils::optimize(&mut module, ["call", "deploy"].to_vec()).is_err() {
+    if pwasm_utils::optimize(&mut module, ["main", "deploy"].to_vec()).is_err() {
         anyhow::bail!("Optimizer failed");
     }
     strip_custom_sections(&mut module);

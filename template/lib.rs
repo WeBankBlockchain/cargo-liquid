@@ -2,6 +2,11 @@
 
 use liquid_lang as liquid;
 
+/// This declaration aims at importing `format!` macro used by `get` method.
+/// If you don't need that, just remove this declaration freely.
+#[macro_use]
+extern crate alloc;
+
 #[liquid::contract(version = "0.1.0")]
 mod {{name}} {
     use liquid_core::storage;
@@ -29,13 +34,12 @@ mod {{name}} {
             // Do *NOT* forget to initialize you storage fields before used them,
             // otherwise you will be trapped in an runtime-error for attempting 
             // to visit uninitialized storage.
-            let name = "{{name}}";
-            self.name.initialize(String::from(name));
+            self.name.initialize(String::from("Alice"));
         }
 
         /// Simply gets the name stored in the storage.
         pub fn get(&self) -> String {
-            self.name.clone()
+            format!("Hello, {}!", self.name.clone())
         }
 
         /// Simply sets a new name to the storage.
@@ -60,7 +64,7 @@ mod {{name}} {
             // call them in test code as if they were normal Rust constructors
             // that take no `self` argument but return `Self`.
             let contract = {{camel_name}}::new();
-            assert_eq!(contract.get(), String::from("Alice"));
+            assert_eq!(contract.get(), String::from("Hello, Alice!"));
         }
 
         /// We test if `set` method does its job.
@@ -72,14 +76,14 @@ mod {{name}} {
             // the variable name to declare that it's mutable.
             let mut contract = {{camel_name}}::new();
 
-            let mut new_name = String::from("Bob");
+            let new_name = String::from("Bob");
 
             // Note that `set` method will take the ownership of `new_name`
             // we provided above, and then `new_name` will be invalid and
             // we cannot use it anymore. To avoid this situation we clone
             // `new_name` here.
             contract.set(new_name.clone());
-            assert_eq!(contract.get(), new_name);
+            assert_eq!(contract.get(), format!("Hello, {}!", new_name));
         }
     }
 }
