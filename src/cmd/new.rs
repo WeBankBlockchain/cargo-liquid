@@ -46,6 +46,7 @@ pub(crate) fn execute_new(name: &str, dir: Option<&PathBuf>) -> Result<String> {
         let contents = contents
             .replace("{{name}}", name)
             .replace("{{camel_name}}", &name.to_camel_case());
+        #[allow(deprecated)]
         let out_path = out_dir.join(file.sanitized_name());
 
         if (&*file.name()).ends_with('/') {
@@ -62,10 +63,12 @@ pub(crate) fn execute_new(name: &str, dir: Option<&PathBuf>) -> Result<String> {
                 .create_new(true)
                 .open(out_path.clone())
                 .map_err(|e| {
+                    #[allow(deprecated)]
+                    let sanitized_name = file.sanitized_name();
                     if e.kind() == std::io::ErrorKind::AlreadyExists {
                         anyhow::anyhow!(
                             "New contract file {} already exists",
-                            file.sanitized_name().display()
+                            sanitized_name.display()
                         )
                     } else {
                         anyhow::anyhow!(e)

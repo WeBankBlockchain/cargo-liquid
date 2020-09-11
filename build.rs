@@ -81,6 +81,7 @@ fn zip_dir(src_dir: &PathBuf, dst_file: &PathBuf) -> Result<()> {
         }
 
         if path.is_file() {
+            #[allow(deprecated)]
             zip.start_file_from_path(name.as_path(), options)?;
             let mut f = File::open(path)?;
 
@@ -88,6 +89,7 @@ fn zip_dir(src_dir: &PathBuf, dst_file: &PathBuf) -> Result<()> {
             zip.write_all(&*buffer)?;
             buffer.clear();
         } else if name.as_os_str().len() != 0 {
+            #[allow(deprecated)]
             zip.add_directory_from_path(name.as_path(), options)?;
         }
     }
