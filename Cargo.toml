@@ -1,6 +1,6 @@
 [package]
 name = "cargo-liquid"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["vita-dounai <lichenxi.webank@gmail.com>"]
 build = "build.rs"
 edition = "2018"
@@ -19,6 +19,8 @@ tempfile = "3.1.0"
 parity-wasm = "0.41.0"
 pwasm-utils = "0.14.0"
 which = "4.0.2"
+indicatif = { version = "0.15.0", features = ["rayon", "improved_unicode"] }
+console = { version = "0.13.0" }
 
 [build-dependencies]
 anyhow = "1.0.32"

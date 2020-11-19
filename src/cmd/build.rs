@@ -17,11 +17,14 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
+use console::Emoji;
+use indicatif::HumanDuration;
 use parity_wasm::elements::{Module, Section};
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
+    time::Instant,
 };
 
 struct CrateMetadata {
@@ -84,6 +87,7 @@ fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata>
 
 fn build_cargo_project(
     crate_metadata: &CrateMetadata,
+    use_gm: bool,
     verbosity: &Option<Verbosity>,
 ) -> Result<()> {
     utils::check_channel()?;
@@ -98,11 +102,14 @@ fn build_cargo_project(
         let manifest_path = Some(manifest_path);
         let target = Some("wasm32-unknown-unknown");
         let target_dir = crate_metadata.target_dir();
-        let other_args = [
-            "--no-default-features",
-            "--release",
-            &format!("--target-dir={}", target_dir.to_string_lossy()),
-        ];
+        let target_dir_args = &format!("--target-dir={}", target_dir.to_string_lossy());
+
+        let mut other_args = ["--no-default-features", "--release", target_dir_args].to_vec();
+
+        if use_gm {
+            other_args.push("--features=gm");
+        }
+
         let args = xargo_lib::Args::new(target, manifest_path, verbosity, &other_args)
             .map_err(|e| anyhow::anyhow!("{}", e))
             .context("Creating xargo args")?;
@@ -263,41 +270,58 @@ fn generate_abi(crate_meta: &CrateMetadata, verbosity: &Option<Verbosity>) -> Re
     Ok(())
 }
 
+static LOOKING_GLASS: Emoji<'_, '_> = Emoji("🔍 ", ":-D");
+static TRUCK: Emoji<'_, '_> = Emoji("🚚 ", ";-)");
+static CLIP: Emoji<'_, '_> = Emoji("🔗 ", "∩ˍ∩");
+static PAPER: Emoji<'_, '_> = Emoji("📃 ", "^_^");
+static SPARKLE: Emoji<'_, '_> = Emoji("✨ ", ":-) ");
+
 pub(crate) fn execute_build(
     manifest_path: ManifestPath,
+    use_gm: bool,
     verbosity: Option<Verbosity>,
 ) -> Result<String> {
+    let started = Instant::now();
+
     println!(
-        "{} {}",
-        "[1/4]".bold(),
+        "{} {} {}",
+        "[1/4]".bold().dimmed(),
+        LOOKING_GLASS,
         "Collecting crate metadata".bright_green().bold()
     );
     let crate_metadata = collect_crate_metadata(&manifest_path)?;
 
     println!(
-        "{} {}",
-        "[2/4]".bold(),
+        "{} {} {}",
+        "[2/4]".bold().dimmed(),
+        TRUCK,
         "Building cargo project".bright_green().bold()
     );
-    build_cargo_project(&crate_metadata, &verbosity)?;
+    build_cargo_project(&crate_metadata, use_gm, &verbosity)?;
 
     println!(
-        "{} {}",
-        "[3/4]".bold(),
+        "{} {} {}",
+        "[3/4]".bold().dimmed(),
+        CLIP,
         "Optimizing wasm file".bright_green().bold()
     );
     optimize_wasm(&crate_metadata)?;
 
     println!(
-        "{} {}",
-        "[4/4]".bold(),
+        "{} {} {}",
+        "[4/4]".bold().dimmed(),
+        PAPER,
         "Generating ABI file".bright_green().bold()
     );
     generate_abi(&crate_metadata, &verbosity)?;
 
     Ok(format!(
-        "Your contract is ready:\n  binary: {}\n  ABI : {}",
+        "\n{}Done in {}, your contract is ready now:\n{}: {}\n{}: {}",
+        SPARKLE,
+        HumanDuration(started.elapsed()),
+        "Binary".green().bold(),
         crate_metadata.dest_wasm.display().to_string().bold(),
+        "ABI".green().bold(),
         crate_metadata.dest_abi.display().to_string().bold(),
     ))
 }

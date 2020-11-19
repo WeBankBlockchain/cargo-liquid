@@ -60,7 +60,7 @@ impl TryFrom<&VerbosityFlags> for Option<Verbosity> {
             (true, false) => Ok(Some(Verbosity::Quiet)),
             (false, false) => Ok(Some(Verbosity::Quiet)),
             (false, true) => Ok(Some(Verbosity::Verbose)),
-            (true, true) => anyhow::bail!("Cannot pass bot --quiet and --verbose flags"),
+            (true, true) => anyhow::bail!("Cannot pass both --quiet and --verbose flags"),
         }
     }
 }
@@ -81,6 +81,8 @@ enum Command {
     Build {
         #[structopt(flatten)]
         verbosity: VerbosityFlags,
+        #[structopt(short, long, help = "Indicates using GM mode or not")]
+        gm: bool,
     },
 }
 
@@ -95,8 +97,8 @@ fn main() {
 fn exec(cmd: Command) -> Result<String> {
     match &cmd {
         Command::New { name, target_dir } => cmd::execute_new(name, target_dir.as_ref()),
-        Command::Build { verbosity } => {
-            cmd::execute_build(Default::default(), verbosity.try_into()?)
+        Command::Build { verbosity, gm } => {
+            cmd::execute_build(Default::default(), *gm, verbosity.try_into()?)
         }
     }
 }
