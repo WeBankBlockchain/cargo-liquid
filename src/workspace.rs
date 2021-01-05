@@ -22,7 +22,7 @@ use toml::value;
 
 const MANIFEST_FILE: &str = "Cargo.toml";
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ManifestPath {
     path: PathBuf,
 }

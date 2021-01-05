@@ -25,16 +25,16 @@ use structopt::{clap, StructOpt};
 #[derive(StructOpt)]
 #[structopt(bin_name = "cargo")]
 pub(crate) enum Opts {
-    /// Utilities to develop Liquid smart contracts
+    /// Utilities to develop liquid project.
     #[structopt(name = "liquid")]
     #[structopt(setting = clap::AppSettings::UnifiedHelpMessage)]
     #[structopt(setting = clap::AppSettings::DeriveDisplayOrder)]
     #[structopt(setting = clap::AppSettings::DontCollapseArgsInUsage)]
-    Contract(ContractArgs),
+    Args(Args),
 }
 
 #[derive(StructOpt)]
-pub(crate) struct ContractArgs {
+pub(crate) struct Args {
     #[structopt(subcommand)]
     cmd: Command,
 }
@@ -67,16 +67,18 @@ impl TryFrom<&VerbosityFlags> for Option<Verbosity> {
 
 #[derive(StructOpt)]
 enum Command {
-    /// Setup and create a new smart contract project
+    /// Setup and create a new liquid project
     #[structopt(name = "new")]
     New {
-        /// The name of the newly created smart contract
+        /// The type of the project, must be `contract` or `collaboration`
+        ty: String,
+        /// The name of the newly created project
         name: String,
-        /// The optional target directory for the contract project
+        /// The optional target directory for the newly created project
         #[structopt(short, long, parse(from_os_str))]
         target_dir: Option<PathBuf>,
     },
-    /// Compiles the smart contract
+    /// Compiles the project
     #[structopt(name = "build")]
     Build {
         #[structopt(flatten)]
@@ -87,7 +89,7 @@ enum Command {
 }
 
 fn main() {
-    let Opts::Contract(args) = Opts::from_args();
+    let Opts::Args(args) = Opts::from_args();
     match exec(args.cmd) {
         Ok(msg) => println!("{}", msg.bold()),
         Err(err) => eprintln!("{} {}", "ERROR:".bright_red().bold(), format!("{:?}", err)),
@@ -96,7 +98,11 @@ fn main() {
 
 fn exec(cmd: Command) -> Result<String> {
     match &cmd {
-        Command::New { name, target_dir } => cmd::execute_new(name, target_dir.as_ref()),
+        Command::New {
+            ty,
+            name,
+            target_dir,
+        } => cmd::execute_new(ty, name, target_dir.as_ref()),
         Command::Build { verbosity, gm } => {
             cmd::execute_build(Default::default(), *gm, verbosity.try_into()?)
         }

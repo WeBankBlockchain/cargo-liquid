@@ -43,7 +43,7 @@ impl CrateMetadata {
     }
 }
 
-/// Parses the contract manifest and returns relevant metadata.
+/// Parses the manifest and returns relevant metadata.
 fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata> {
     let (metadata, root_package_id) = utils::get_cargo_metadata(manifest_path)?;
 
@@ -105,7 +105,6 @@ fn build_cargo_project(
         let target_dir_args = &format!("--target-dir={}", target_dir.to_string_lossy());
 
         let mut other_args = ["--no-default-features", "--release", target_dir_args].to_vec();
-
         if use_gm {
             other_args.push("--features=gm");
         }
@@ -172,7 +171,12 @@ fn optimize_wasm(crate_metadata: &CrateMetadata) -> Result<()> {
     //
     // In practice only tree-shaking is performed, i.e transitively removing all symbols that are
     // NOT used by the specified entrypoints.
-    if pwasm_utils::optimize(&mut module, ["main", "deploy", "memory", "hash_type"].to_vec()).is_err() {
+    if pwasm_utils::optimize(
+        &mut module,
+        ["main", "deploy", "memory", "hash_type"].to_vec(),
+    )
+    .is_err()
+    {
         anyhow::bail!("Optimizer failed");
     }
     strip_custom_sections(&mut module);
@@ -184,7 +188,7 @@ fn optimize_wasm(crate_metadata: &CrateMetadata) -> Result<()> {
         println!(
             "{}",
             "wasm-opt is not installed. Install this tool on your system in order to \n\
-             reduce the size of your contract's Wasm binary. \n\
+             reduce the size of your Wasm binary. \n\
              See https://github.com/WebAssembly/binaryen#tools"
                 .bright_yellow()
         );
@@ -316,7 +320,7 @@ pub(crate) fn execute_build(
     generate_abi(&crate_metadata, &verbosity)?;
 
     Ok(format!(
-        "\n{}Done in {}, your contract is ready now:\n{}: {}\n{}: {}",
+        "\n{}Done in {}, your project is ready now:\n{}: {}\n{}: {}",
         SPARKLE,
         HumanDuration(started.elapsed()),
         "Binary".green().bold(),

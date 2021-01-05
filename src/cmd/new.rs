@@ -11,6 +11,7 @@
 // limitations under the License.
 
 use anyhow::Result;
+use colored::Colorize;
 use heck::CamelCase;
 use std::{
     env, fs,
@@ -18,9 +19,13 @@ use std::{
     path::PathBuf,
 };
 
-pub(crate) fn execute_new(name: &str, dir: Option<&PathBuf>) -> Result<String> {
+pub(crate) fn execute_new(ty: &str, name: &str, dir: Option<&PathBuf>) -> Result<String> {
+    if ty != "contract" && ty != "collaboration" {
+        anyhow::bail!("Unsupported project type: `{}`", ty);
+    }
+
     if name.contains('-') {
-        anyhow::bail!("Contract names cannot contain hyphens");
+        anyhow::bail!("Project names cannot contain hyphens");
     }
 
     let out_dir = dir.unwrap_or(&env::current_dir()?).join(name);
@@ -40,6 +45,10 @@ pub(crate) fn execute_new(name: &str, dir: Option<&PathBuf>) -> Result<String> {
     let mut archive = zip::ZipArchive::new(cursor)?;
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
+        if !(file.name().starts_with(ty)) {
+            continue;
+        }
+
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
 
@@ -47,9 +56,9 @@ pub(crate) fn execute_new(name: &str, dir: Option<&PathBuf>) -> Result<String> {
             .replace("{{name}}", name)
             .replace("{{camel_name}}", &name.to_camel_case());
         #[allow(deprecated)]
-        let out_path = out_dir.join(file.sanitized_name());
+        let out_path = out_dir.join(file.sanitized_name().strip_prefix(ty).unwrap());
 
-        if (&*file.name()).ends_with('/') {
+        if file.name().ends_with('/') {
             fs::create_dir_all(&out_path)?;
         } else {
             if let Some(p) = out_path.parent() {
@@ -65,6 +74,7 @@ pub(crate) fn execute_new(name: &str, dir: Option<&PathBuf>) -> Result<String> {
                 .map_err(|e| {
                     #[allow(deprecated)]
                     let sanitized_name = file.sanitized_name();
+                    let sanitized_name = sanitized_name.strip_prefix(ty).unwrap();
                     if e.kind() == std::io::ErrorKind::AlreadyExists {
                         anyhow::anyhow!(
                             "New contract file {} already exists",
@@ -88,5 +98,5 @@ pub(crate) fn execute_new(name: &str, dir: Option<&PathBuf>) -> Result<String> {
         }
     }
 
-    Ok(format!("Contract {} created", name))
+    Ok(format!("Project {} created", name.bold().green()))
 }
