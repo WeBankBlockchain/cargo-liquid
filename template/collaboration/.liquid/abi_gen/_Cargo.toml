@@ -16,7 +16,7 @@ default-features = false
 features = ["liquid-abi-gen"]
 
 [dependencies.liquid_lang]
-git = "https://github.com/vita-dounai/liquid"
+git = "https://github.com/WeBankBlockchain/liquiid"
 branch = "1.0.0-rc1"
 package = "liquid_lang"
 default-features = false
