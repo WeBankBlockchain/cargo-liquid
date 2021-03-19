@@ -1,6 +1,6 @@
 [package]
 name = "abi-gen"
-version = "0.3.0"
+version = "1.0.0-rc1"
 authors = ["vita-dounai <lichenxi.webank@gmail.com>"]
 edition = "2018"
 publish = false
@@ -17,7 +17,7 @@ features = ["liquid-abi-gen"]
 
 [dependencies.liquid_lang]
 git = "https://github.com/vita-dounai/liquid"
-branch = "release-0.3.0"
+branch = "1.0.0-rc1"
 package = "liquid_lang"
 default-features = false
 features = ["contract-abi-gen"]
