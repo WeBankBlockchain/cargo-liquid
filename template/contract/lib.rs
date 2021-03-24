@@ -1,9 +1,12 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
+use liquid::storage;
 use liquid_lang as liquid;
 
 #[liquid::contract]
 mod {{name}} {
+    use super::*;
+
     /// Defines the state variables of your contract.
     #[liquid(storage)]
     struct {{camel_name}} {}
