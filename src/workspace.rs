@@ -16,7 +16,7 @@ use std::{
     collections::{HashMap, HashSet},
     convert::{TryFrom, TryInto},
     fs,
-    path::{Path, PathBuf},
+    path::{Path, PathBuf, MAIN_SEPARATOR},
 };
 use toml::value;
 
@@ -56,9 +56,9 @@ impl Default for ManifestPath {
     }
 }
 
-impl Into<PathBuf> for &ManifestPath {
-    fn into(self) -> PathBuf {
-        self.path.clone()
+impl From<&ManifestPath> for PathBuf {
+    fn from(manifest_path: &ManifestPath) -> Self {
+        manifest_path.path.clone()
     }
 }
 
@@ -122,12 +122,12 @@ impl Manifest {
             .or_insert(value::Value::Table(Default::default()));
         let release = profile
             .as_table_mut()
-            .ok_or(anyhow::anyhow!("profile should be a table"))?
+            .ok_or_else(|| anyhow::anyhow!("profile should be a table"))?
             .entry("release")
             .or_insert(value::Value::Table(Default::default()));
         let lto = release
             .as_table_mut()
-            .ok_or(anyhow::anyhow!("release should be a table"))?
+            .ok_or_else(|| anyhow::anyhow!("release should be a table"))?
             .entry("lto")
             .or_insert(enabled.into());
         *lto = enabled.into();
@@ -139,14 +139,14 @@ impl Manifest {
         let lib = self
             .toml
             .get_mut("lib")
-            .ok_or(anyhow::anyhow!("lib section not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("lib section not found"))?;
         let crate_types = lib
             .get_mut("crate-type")
-            .ok_or(anyhow::anyhow!("crate-type section not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("crate-type section not found"))?;
 
         crate_types
             .as_array_mut()
-            .ok_or(anyhow::anyhow!("crate-types should be an Array"))
+            .ok_or_else(|| anyhow::anyhow!("crate-types should be an Array"))
     }
 
     /// Writes the amended manifest to the given path.
@@ -185,7 +185,7 @@ impl Manifest {
         let to_absolute = |value_id: String, existing_path: &mut value::Value| -> Result<()> {
             let path_str = existing_path
                 .as_str()
-                .ok_or(anyhow::anyhow!("{} should be a string", value_id))?;
+                .ok_or_else(|| anyhow::anyhow!("{} should be a string", value_id))?;
             let path = PathBuf::from(path_str);
             if path.is_relative() {
                 let lib_abs = abs_dir.join(path);
@@ -195,10 +195,9 @@ impl Manifest {
         };
 
         let rewrite_path = |table_value: &mut value::Value, table_section: &str, default: &str| {
-            let table = table_value.as_table_mut().ok_or(anyhow::anyhow!(
-                "'[{}]' section should be a table",
-                table_section
-            ))?;
+            let table = table_value.as_table_mut().ok_or_else(|| {
+                anyhow::anyhow!("'[{}]' section should be a table", table_section)
+            })?;
 
             match table.get_mut("path") {
                 Some(existing_path) => {
@@ -224,18 +223,26 @@ impl Manifest {
 
         // Rewrite `[lib] path = /path/to/lib.rs`
         if let Some(lib) = self.toml.get_mut("lib") {
-            rewrite_path(lib, "lib", "src/lib.rs")?;
+            rewrite_path(
+                lib,
+                "lib",
+                &["src", "lib.rs"].join(&MAIN_SEPARATOR.to_string()),
+            )?;
         }
 
         // Rewrite `[[bin]] path = /path/to/main.rs`
         if let Some(bin) = self.toml.get_mut("bin") {
             let bins = bin
                 .as_array_mut()
-                .ok_or(anyhow::anyhow!("'[[bin]]' section should be a table array"))?;
+                .ok_or_else(|| anyhow::anyhow!("'[[bin]]' section should be a table array"))?;
 
             // Rewrite `[[bin]] path =` value to an absolute path.
             for bin in bins {
-                rewrite_path(bin, "[bin]", "src/main.rs")?;
+                rewrite_path(
+                    bin,
+                    "[bin]",
+                    &["src", "main.rs"].join(&MAIN_SEPARATOR.to_string()),
+                )?;
             }
         }
 
@@ -247,7 +254,7 @@ impl Manifest {
                 .collect::<HashSet<_>>();
             let table = dependencies
                 .as_table_mut()
-                .ok_or(anyhow::anyhow!("dependencies should be a table"))?;
+                .ok_or_else(|| anyhow::anyhow!("dependencies should be a table"))?;
             for (name, value) in table {
                 let package_name = {
                     let package = value.get("package");
@@ -269,6 +276,7 @@ impl Manifest {
     }
 }
 
+#[allow(clippy::ptr_arg)]
 fn crate_type_exists(crate_type: &str, crate_types: &value::Array) -> bool {
     crate_types
         .iter()
@@ -295,10 +303,12 @@ impl Workspace {
                 .packages
                 .iter()
                 .find(|p| p.id == *package_id)
-                .expect(&format!(
-                    "Package '{}' is a member and should be in the packages list",
-                    package_id
-                ));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Package '{}' is a member and should be in the packages list",
+                        package_id
+                    )
+                });
             let manifest = Manifest::new(&package.manifest_path)?;
             Ok((package_id.clone(), (package.clone(), manifest)))
         };
