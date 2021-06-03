@@ -18,13 +18,20 @@ use crate::{
 use anyhow::{Context, Result};
 use colored::Colorize;
 use console::Emoji;
+use crossterm::{
+    cursor::{self, DisableBlinking, EnableBlinking, MoveTo},
+    execute, terminal,
+};
 use indicatif::HumanDuration;
 use parity_wasm::elements::{Module, Section};
+use std::sync::mpsc::channel;
 use std::{
-    io::{self, Write},
+    io::{self, stderr, Write},
     path::{Path, PathBuf},
     process::Command,
-    time::Instant,
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
 };
 
 struct CrateMetadata {
@@ -88,14 +95,17 @@ fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata>
 fn build_cargo_project(
     crate_metadata: &CrateMetadata,
     use_gm: bool,
-    verbosity: &Option<Verbosity>,
+    verbosity: Verbosity,
 ) -> Result<()> {
     utils::check_channel()?;
-    std::env::set_var("RUSTFLAGS", "-C link-arg=-z -C link-arg=stack-size=65536");
+    std::env::set_var(
+        "RUSTFLAGS",
+        "--emit mir -C link-arg=-z -C link-arg=stack-size=65536",
+    );
 
     let verbosity = Some(match verbosity {
-        Some(Verbosity::Verbose) => xargo_lib::Verbosity::Verbose,
-        Some(Verbosity::Quiet) | None => xargo_lib::Verbosity::Quiet,
+        Verbosity::Verbose => xargo_lib::Verbosity::Verbose,
+        Verbosity::Quiet => xargo_lib::Verbosity::Quiet,
     });
 
     let xbuild = |manifest_path: &ManifestPath| {
@@ -144,11 +154,11 @@ fn build_cargo_project(
 ///
 /// Presently all custom sections are not required so they can be stripped safely.
 fn strip_custom_sections(module: &mut Module) {
-    module.sections_mut().retain(|section| match section {
-        Section::Custom(_) => false,
-        Section::Name(_) => false,
-        Section::Reloc(_) => false,
-        _ => true,
+    module.sections_mut().retain(|section| {
+        !matches!(
+            section,
+            Section::Custom(_) | Section::Name(_) | Section::Reloc(_)
+        )
     });
 }
 
@@ -185,7 +195,7 @@ fn optimize_wasm(crate_metadata: &CrateMetadata) -> Result<()> {
 
     // check `wasm-opt` installed
     if which::which("wasm-opt").is_err() {
-        println!(
+        eprintln!(
             "{}",
             "wasm-opt is not installed. Install this tool on your system in order to \n\
              reduce the size of your Wasm binary. \n\
@@ -218,12 +228,12 @@ fn optimize_wasm(crate_metadata: &CrateMetadata) -> Result<()> {
     Ok(())
 }
 
-fn generate_abi(crate_meta: &CrateMetadata, verbosity: &Option<Verbosity>) -> Result<()> {
+fn generate_abi(crate_meta: &CrateMetadata, verbosity: Verbosity) -> Result<()> {
     utils::check_channel()?;
     std::env::set_var("RUSTFLAGS", "");
 
     let build = |manifest_path: &ManifestPath| -> Result<()> {
-        let cargo = std::env::var("CARGO").unwrap_or("cargo".to_string());
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
         let mut cmd = Command::new(cargo);
 
         let origin_manifest_path = crate_meta.manifest_path.as_ref().canonicalize()?;
@@ -243,8 +253,8 @@ fn generate_abi(crate_meta: &CrateMetadata, verbosity: &Option<Verbosity>) -> Re
             .as_str(),
             format!("--target-dir={}", crate_meta.target_dir().to_string_lossy()).as_str(),
             match verbosity {
-                Some(Verbosity::Quiet) | None => "--quiet",
-                Some(Verbosity::Verbose) => "--verbose",
+                Verbosity::Quiet => "--quiet",
+                Verbosity::Verbose => "--verbose",
             },
         ]
         .iter()
@@ -274,53 +284,185 @@ fn generate_abi(crate_meta: &CrateMetadata, verbosity: &Option<Verbosity>) -> Re
     Ok(())
 }
 
-static LOOKING_GLASS: Emoji<'_, '_> = Emoji("🔍 ", ":-D");
-static TRUCK: Emoji<'_, '_> = Emoji("🚚 ", ";-)");
-static CLIP: Emoji<'_, '_> = Emoji("🔗 ", "∩ˍ∩");
-static PAPER: Emoji<'_, '_> = Emoji("📃 ", "^_^");
-static SPARKLE: Emoji<'_, '_> = Emoji("✨ ", ":-) ");
+static LOOKING_GLASS: Emoji<'_, '_> = Emoji("🔍 ", "d(・ω・d)");
+static TRUCK: Emoji<'_, '_> = Emoji("🚚 ", "(∫・ω・)∫");
+static CLIP: Emoji<'_, '_> = Emoji("🔗 ", "∇(・ω・∇)");
+static PAPER: Emoji<'_, '_> = Emoji("📃 ", "∂(・ω・∂)");
+static SPARKLE: Emoji<'_, '_> = Emoji("✨ ", "(˘•ω•˘)ง ");
+
+struct FormattedDuration(Duration);
+
+impl std::fmt::Display for FormattedDuration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut t = self.0.as_millis();
+        let millis = t % 1000;
+        t /= 1000;
+        let seconds = t % 60;
+        t /= 60;
+        let minutes = t % 60;
+        t /= 60;
+        let hours = t % 24;
+        t /= 24;
+        if t > 0 {
+            let days = t;
+            write!(
+                f,
+                "{}d {:02}:{:02}:{:02}.{:03}",
+                days, hours, minutes, seconds, millis
+            )
+        } else {
+            write!(
+                f,
+                "{:02}:{:02}:{:02}.{:03}",
+                hours, minutes, seconds, millis
+            )
+        }
+    }
+}
+
+fn execute_task<F, T, E>(
+    stage: &str,
+    emoji: Emoji<'_, '_>,
+    message: &str,
+    f: F,
+    show_animation: bool,
+) -> Result<T, E>
+where
+    F: FnOnce() -> Result<T, E> + Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    const INDICATES: [char; 4] = ['|', '/', '-', '\\'];
+    let stage = stage.bold().dimmed();
+    let message = message.bold().bright_green();
+    let started = Instant::now();
+
+    if show_animation {
+        let origin_pos = cursor::position().unwrap();
+        eprintln!();
+
+        let (tx, rx) = channel();
+        let t = thread::spawn(move || {
+            let result = f();
+            tx.send(matches!(result, Ok(_))).unwrap();
+            result
+        });
+
+        let mut i = 0;
+        let mut stderr = stderr();
+        let success = loop {
+            if let Ok(success) = rx.try_recv() {
+                break success;
+            }
+
+            let elapsed = format!("[{}]", FormattedDuration(started.elapsed())).cyan();
+            let info = format!(
+                "{} {} {} {: <25} {}\r",
+                INDICATES[i], stage, emoji, message, elapsed
+            );
+            i = (i + 1) % INDICATES.len();
+
+            {
+                let mut handle = stderr.lock();
+                let cursor_pos = cursor::position().unwrap();
+                if cursor_pos.1 - origin_pos.1 > 8 {
+                    break false;
+                }
+
+                execute!(handle, DisableBlinking, MoveTo(origin_pos.0, origin_pos.1)).unwrap();
+                handle.write_all(info.as_bytes()).unwrap();
+                handle.flush().unwrap();
+                execute!(handle, EnableBlinking, MoveTo(cursor_pos.0, cursor_pos.1),).unwrap();
+            }
+
+            thread::sleep(Duration::from_millis(50));
+        };
+
+        if success {
+            let elapsed = format!("[{}]", FormattedDuration(started.elapsed())).cyan();
+            let info = format!(
+                "{} {} {} {: <25} {}\n",
+                "√".green(),
+                stage,
+                emoji,
+                message,
+                elapsed,
+            );
+            let cursor_pos = cursor::position().unwrap();
+            execute!(stderr, MoveTo(origin_pos.0, origin_pos.1)).unwrap();
+            stderr.write_all(info.as_bytes()).unwrap();
+            execute!(stderr, MoveTo(cursor_pos.0, cursor_pos.1)).unwrap();
+        }
+        t.join().unwrap()
+    } else {
+        eprintln!("{}", format!("* {} {} {}", stage, emoji, message));
+        f()
+    }
+}
 
 pub(crate) fn execute_build(
     manifest_path: ManifestPath,
     use_gm: bool,
-    verbosity: Option<Verbosity>,
+    verbosity: Verbosity,
 ) -> Result<String> {
     let started = Instant::now();
+    let terminal_size = terminal::size();
+    let current_pos = cursor::position();
+    let show_animation = matches!(verbosity, Verbosity::Quiet)
+        && match (terminal_size, current_pos) {
+            (Ok(terminal_size), Ok(current_pos)) => {
+                !(terminal_size.1 < 16 || terminal_size.1 - current_pos.1 < 16)
+            }
+            _ => false,
+        };
+    let crate_metadata;
 
-    println!(
-        "{} {} {}",
-        "[1/4]".bold().dimmed(),
-        LOOKING_GLASS,
-        "Collecting crate metadata".bright_green().bold()
-    );
-    let crate_metadata = collect_crate_metadata(&manifest_path)?;
+    {
+        let result = execute_task(
+            "[1/4]",
+            LOOKING_GLASS,
+            "Collecting crate metadata",
+            move || collect_crate_metadata(&manifest_path),
+            show_animation,
+        );
+        crate_metadata = Arc::new(result?);
+    }
 
-    println!(
-        "{} {} {}",
-        "[2/4]".bold().dimmed(),
-        TRUCK,
-        "Building cargo project".bright_green().bold()
-    );
-    build_cargo_project(&crate_metadata, use_gm, &verbosity)?;
+    {
+        let crate_metadata = crate_metadata.clone();
+        execute_task(
+            "[2/4]",
+            TRUCK,
+            "Building cargo project",
+            move || build_cargo_project(crate_metadata.as_ref(), use_gm, verbosity),
+            show_animation,
+        )?;
+    }
 
-    println!(
-        "{} {} {}",
-        "[3/4]".bold().dimmed(),
-        CLIP,
-        "Optimizing wasm file".bright_green().bold()
-    );
-    optimize_wasm(&crate_metadata)?;
+    {
+        let crate_metadata = crate_metadata.clone();
+        execute_task(
+            "[3/4]",
+            CLIP,
+            "Optimizing Wasm bytecode",
+            move || optimize_wasm(crate_metadata.as_ref()),
+            show_animation,
+        )?;
+    }
 
-    println!(
-        "{} {} {}",
-        "[4/4]".bold().dimmed(),
-        PAPER,
-        "Generating ABI file".bright_green().bold()
-    );
-    generate_abi(&crate_metadata, &verbosity)?;
+    {
+        let crate_metadata = crate_metadata.clone();
+        execute_task(
+            "[4/4]",
+            PAPER,
+            "Generating ABI file",
+            move || generate_abi(crate_metadata.as_ref(), verbosity),
+            show_animation,
+        )?;
+    }
 
     Ok(format!(
-        "\n{}Done in {}, your project is ready now:\n{}: {}\n{}: {}",
+        "\n{}Done in {}, your project is ready now:\n{: >6}: {}\n{: >6}: {}",
         SPARKLE,
         HumanDuration(started.elapsed()),
         "Binary".green().bold(),

@@ -47,19 +47,20 @@ struct VerbosityFlags {
     verbose: bool,
 }
 
+#[derive(Copy, Clone)]
 enum Verbosity {
     Quiet,
     Verbose,
 }
 
-impl TryFrom<&VerbosityFlags> for Option<Verbosity> {
+impl TryFrom<&VerbosityFlags> for Verbosity {
     type Error = Error;
 
     fn try_from(value: &VerbosityFlags) -> Result<Self, Self::Error> {
         match (value.quiet, value.verbose) {
-            (true, false) => Ok(Some(Verbosity::Quiet)),
-            (false, false) => Ok(Some(Verbosity::Quiet)),
-            (false, true) => Ok(Some(Verbosity::Verbose)),
+            (true, false) => Ok(Verbosity::Quiet),
+            (false, false) => Ok(Verbosity::Quiet),
+            (false, true) => Ok(Verbosity::Verbose),
             (true, true) => anyhow::bail!("Cannot pass both --quiet and --verbose flags"),
         }
     }
