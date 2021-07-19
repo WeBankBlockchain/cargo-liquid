@@ -33,7 +33,7 @@ impl ManifestPath {
         let manifest = path.as_ref();
         if let Some(file_name) = manifest.file_name() {
             if file_name != MANIFEST_FILE {
-                anyhow::bail!("Manifest file must be a Cargo.toml")
+                anyhow::bail!("manifest file must be a Cargo.toml")
             }
         }
         Ok(ManifestPath {
@@ -180,7 +180,7 @@ impl Manifest {
         let abs_path = self.path.as_ref().canonicalize()?;
         let abs_dir = abs_path
             .parent()
-            .expect("The manifest path is a file path so has a parent");
+            .expect("the manifest path is a file path so has a parent");
 
         let to_absolute = |value_id: String, existing_path: &mut value::Value| -> Result<()> {
             let path_str = existing_path
@@ -223,10 +223,23 @@ impl Manifest {
 
         // Rewrite `[lib] path = /path/to/lib.rs`
         if let Some(lib) = self.toml.get_mut("lib") {
+            let mut default_path = PathBuf::new();
+            default_path.push(
+                self.path
+                    .as_ref()
+                    .parent()
+                    .expect("the manifest path is a file path so has a parent"),
+            );
+            default_path.push("src");
+            default_path.push("lib.rs");
+
             rewrite_path(
                 lib,
                 "lib",
-                &["src", "lib.rs"].join(&MAIN_SEPARATOR.to_string()),
+                default_path.to_str().expect(&format!(
+                    "the manifest path contains invalid UTF-8 characters: {:?}",
+                    default_path
+                )),
             )?;
         }
 
@@ -344,7 +357,7 @@ impl Workspace {
             .members
             .get_mut(&self.root_package)
             .map(|(_, m)| m)
-            .expect("The root package should be a workspace member");
+            .expect("the root package should be a workspace member");
         f(root_package_manifest)?;
         Ok(self)
     }

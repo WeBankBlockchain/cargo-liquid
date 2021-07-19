@@ -13,29 +13,22 @@
 use crate::{
     utils,
     workspace::{ManifestPath, Workspace},
-    Verbosity,
+    VerbosityBehavior,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
 use console::Emoji;
-use crossterm::{
-    cursor::{self, DisableBlinking, EnableBlinking, MoveTo},
-    execute, terminal,
-};
 use indicatif::HumanDuration;
 use parity_wasm::elements::{Module, Section};
-use std::sync::mpsc::channel;
 use std::{
-    io::{self, stderr, Write},
+    env, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
-    thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 struct CrateMetadata {
-    manifest_path: ManifestPath,
     cargo_meta: cargo_metadata::Metadata,
     package_name: String,
     root_package: cargo_metadata::Package,
@@ -50,6 +43,8 @@ impl CrateMetadata {
     }
 }
 
+const BUILD_TARGET_ARCH: &'static str = "wasm32-unknown-unknown";
+
 /// Parses the manifest and returns relevant metadata.
 fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata> {
     let (metadata, root_package_id) = utils::get_cargo_metadata(manifest_path)?;
@@ -60,14 +55,15 @@ fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata>
         .packages
         .iter()
         .find(|package| package.id == root_package_id)
-        .expect("The package is not in the `cargo metadata` output")
+        .expect("the package is not in the `cargo metadata` output")
         .clone();
     // Normalize the package name.
     let package_name = root_package.name.replace("-", "_");
 
     let mut original_wasm = metadata.target_directory.clone();
-    original_wasm.push("wasm32-unknown-unknown");
+    original_wasm.push(BUILD_TARGET_ARCH);
     original_wasm.push("release");
+    original_wasm.push("deps");
     original_wasm.push(package_name.clone());
     original_wasm.set_extension("wasm");
 
@@ -75,12 +71,10 @@ fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata>
     dest_wasm.push(package_name.clone());
     dest_wasm.set_extension("wasm");
 
-    let mut dest_abi = metadata.target_directory.clone();
-    dest_abi.push(package_name.clone());
+    let mut dest_abi = dest_wasm.clone();
     dest_abi.set_extension("abi");
 
     let crate_metadata = CrateMetadata {
-        manifest_path: manifest_path.clone(),
         cargo_meta: metadata,
         root_package,
         package_name,
@@ -92,49 +86,44 @@ fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata>
     Ok(crate_metadata)
 }
 
-fn build_cargo_project(
+fn run_xargo_build(
     crate_metadata: &CrateMetadata,
     use_gm: bool,
-    verbosity: Verbosity,
+    verbosity_behavior: VerbosityBehavior,
 ) -> Result<()> {
     utils::check_channel()?;
-    std::env::set_var(
-        "RUSTFLAGS",
-        "--emit mir -C link-arg=-z -C link-arg=stack-size=65536",
-    );
-
-    let verbosity = Some(match verbosity {
-        Verbosity::Verbose => xargo_lib::Verbosity::Verbose,
-        Verbosity::Quiet => xargo_lib::Verbosity::Quiet,
-    });
 
     let xbuild = |manifest_path: &ManifestPath| {
         let manifest_path = Some(manifest_path);
-        let target = Some("wasm32-unknown-unknown");
+        let target = Some(BUILD_TARGET_ARCH);
         let target_dir = crate_metadata.target_dir();
-        let target_dir_args = &format!("--target-dir={}", target_dir.to_string_lossy());
+        let target_dir_arg = format!("--target-dir={}", target_dir.to_string_lossy());
 
-        let mut other_args = ["--no-default-features", "--release", target_dir_args].to_vec();
+        let mut other_args = ["--no-default-features", "--release", &target_dir_arg].to_vec();
         if use_gm {
             other_args.push("--features=gm");
         }
 
-        let args = xargo_lib::Args::new(target, manifest_path, verbosity, &other_args)
-            .map_err(|e| anyhow::anyhow!("{}", e))
-            .context("Creating xargo args")?;
-
+        let args = xargo_lib::Args::new(
+            target,
+            manifest_path,
+            Some(verbosity_behavior.into()),
+            other_args,
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))
+        .context("Creating xargo args")?;
         let config = xargo_lib::Config {
             sysroot_path: target_dir.join("sysroot"),
             memcpy: false,
             panic_immediate_abort: true,
         };
-
         let exit_status = xargo_lib::build(args, "build", Some(config))
             .map_err(|e| anyhow::anyhow!("{}", e))
-            .context("Building with xbuild")?;
+            .context("Building with xargo")?;
         if !exit_status.success() {
-            anyhow::bail!("xbuild failed with status {}", exit_status)
+            anyhow::bail!("xbuild failed with status {}", exit_status);
         }
+
         Ok(())
     };
 
@@ -146,6 +135,71 @@ fn build_cargo_project(
             Ok(())
         })?
         .using_temp(xbuild)?;
+    Ok(())
+}
+
+fn build_cargo_project(
+    crate_metadata: &CrateMetadata,
+    use_gm: bool,
+    verbosity_behavior: VerbosityBehavior,
+    enforce_analysis: bool,
+    cg_path: &Option<PathBuf>,
+) -> Result<()> {
+    const RUSTFLAGS_ENV_VAR: &'static str = "RUSTFLAGS";
+    let old_flags = env::var(RUSTFLAGS_ENV_VAR);
+    if let Ok(ref old_flags) = old_flags {
+        env::set_var(
+            RUSTFLAGS_ENV_VAR,
+            [old_flags, "-C link-arg=-z -C link-arg=stack-size=65536"].join(" "),
+        );
+    }
+
+    if enforce_analysis {
+        // This is a dirty way to enforce starting liquid-analy, just make cargo to
+        // think that the target directory is dirty now. 🙈
+        drop(fs::remove_file(&crate_metadata.original_wasm));
+    }
+
+    /// Sets `RUSTC_WRAPPER` environment variable for current process, which leads
+    /// cargo to invoke liquid-analy as compiler, and liquid-analy can then obtain
+    /// full list of command line arguments of the invocation above.
+    ///
+    /// ## Why not use `RUSTC`?
+    /// Due to that we use unstable version of rustc, and features supported by
+    /// the compiler is inconstant, using compilers of different version to test
+    /// this project is significant. Via setting different `RUSTC` value we can
+    /// achieve this aim easily. But if we use `RUSTC` directly here, then it
+    /// becomes difficult to decide which version of rustc to use in liquid-analy.
+    const RUSTC_WRAPPER_ENV_VAR: &'static str = "RUSTC_WRAPPER";
+    let old_wrapper = env::var(RUSTC_WRAPPER_ENV_VAR);
+    env::set_var(RUSTC_WRAPPER_ENV_VAR, "liquid-analy");
+
+    // The `LIQUID_ANALYSIS_PROJECT` environment variable is used to tell
+    // liquid-analy the project it needs to care about.
+    env::set_var(
+        "LIQUID_ANALYSIS_PROJECT",
+        crate_metadata.package_name.clone(),
+    );
+
+    if let Some(cg_path) = cg_path {
+        let abs_path = if cg_path.is_absolute() {
+            cg_path.to_path_buf()
+        } else {
+            let cur_dir = env::current_dir()?;
+            cur_dir.join(cg_path)
+        };
+        env::set_var("LIQUID_ANALYSIS_CFG_PATH", abs_path);
+    }
+
+    run_xargo_build(crate_metadata, use_gm, verbosity_behavior)?;
+
+    if let Ok(old_flags) = old_flags {
+        env::set_var(RUSTFLAGS_ENV_VAR, old_flags);
+    }
+
+    if let Ok(old_wrapper) = old_wrapper {
+        env::set_var(RUSTC_WRAPPER_ENV_VAR, old_wrapper);
+    }
 
     Ok(())
 }
@@ -224,22 +278,21 @@ fn optimize_wasm(crate_metadata: &CrateMetadata) -> Result<()> {
     }
 
     // overwrite existing destination wasm file with the optimised version
-    std::fs::rename(&optimized, &crate_metadata.dest_wasm)?;
+    fs::rename(&optimized, &crate_metadata.dest_wasm)?;
     Ok(())
 }
 
-fn generate_abi(crate_meta: &CrateMetadata, verbosity: Verbosity) -> Result<()> {
+fn generate_abi(crate_meta: &CrateMetadata, verbosity_behavior: VerbosityBehavior) -> Result<()> {
     utils::check_channel()?;
-    std::env::set_var("RUSTFLAGS", "");
 
     let build = |manifest_path: &ManifestPath| -> Result<()> {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
         let mut cmd = Command::new(cargo);
 
-        let origin_manifest_path = crate_meta.manifest_path.as_ref().canonicalize()?;
-        let work_dir = origin_manifest_path
+        let work_dir = crate_meta
+            .dest_abi
             .parent()
-            .expect("The manifest path is a file path so has a parent");
+            .expect("the ABI file is a file path so has a parent");
         cmd.current_dir(work_dir);
 
         [
@@ -252,9 +305,9 @@ fn generate_abi(crate_meta: &CrateMetadata, verbosity: Verbosity) -> Result<()> 
             )
             .as_str(),
             format!("--target-dir={}", crate_meta.target_dir().to_string_lossy()).as_str(),
-            match verbosity {
-                Verbosity::Quiet => "--quiet",
-                Verbosity::Verbose => "--verbose",
+            match verbosity_behavior {
+                VerbosityBehavior::Quiet => "--quiet",
+                VerbosityBehavior::Verbose => "--verbose",
             },
         ]
         .iter()
@@ -290,177 +343,41 @@ static CLIP: Emoji<'_, '_> = Emoji("🔗 ", "∇(・ω・∇)");
 static PAPER: Emoji<'_, '_> = Emoji("📃 ", "∂(・ω・∂)");
 static SPARKLE: Emoji<'_, '_> = Emoji("✨ ", "(˘•ω•˘)ง ");
 
-struct FormattedDuration(Duration);
-
-impl std::fmt::Display for FormattedDuration {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut t = self.0.as_millis();
-        let millis = t % 1000;
-        t /= 1000;
-        let seconds = t % 60;
-        t /= 60;
-        let minutes = t % 60;
-        t /= 60;
-        let hours = t % 24;
-        t /= 24;
-        if t > 0 {
-            let days = t;
-            write!(
-                f,
-                "{}d {:02}:{:02}:{:02}.{:03}",
-                days, hours, minutes, seconds, millis
-            )
-        } else {
-            write!(
-                f,
-                "{:02}:{:02}:{:02}.{:03}",
-                hours, minutes, seconds, millis
-            )
-        }
-    }
-}
-
-fn execute_task<F, T, E>(
-    stage: &str,
-    emoji: Emoji<'_, '_>,
-    message: &str,
-    f: F,
-    show_animation: bool,
-) -> Result<T, E>
-where
-    F: FnOnce() -> Result<T, E> + Send + 'static,
-    T: Send + 'static,
-    E: Send + 'static,
-{
-    const INDICATES: [char; 4] = ['|', '/', '-', '\\'];
-    let stage = stage.bold().dimmed();
-    let message = message.bold().bright_green();
-    let started = Instant::now();
-
-    if show_animation {
-        let origin_pos = cursor::position().unwrap();
-        eprintln!();
-
-        let (tx, rx) = channel();
-        let t = thread::spawn(move || {
-            let result = f();
-            tx.send(matches!(result, Ok(_))).unwrap();
-            result
-        });
-
-        let mut i = 0;
-        let mut stderr = stderr();
-        let success = loop {
-            if let Ok(success) = rx.try_recv() {
-                break success;
-            }
-
-            let elapsed = format!("[{}]", FormattedDuration(started.elapsed())).cyan();
-            let info = format!(
-                "{} {} {} {: <25} {}\r",
-                INDICATES[i], stage, emoji, message, elapsed
-            );
-            i = (i + 1) % INDICATES.len();
-
-            {
-                let mut handle = stderr.lock();
-                let cursor_pos = cursor::position().unwrap();
-                if cursor_pos.1 - origin_pos.1 > 8 {
-                    break false;
-                }
-
-                execute!(handle, DisableBlinking, MoveTo(origin_pos.0, origin_pos.1)).unwrap();
-                handle.write_all(info.as_bytes()).unwrap();
-                handle.flush().unwrap();
-                execute!(handle, EnableBlinking, MoveTo(cursor_pos.0, cursor_pos.1),).unwrap();
-            }
-
-            thread::sleep(Duration::from_millis(50));
-        };
-
-        if success {
-            let elapsed = format!("[{}]", FormattedDuration(started.elapsed())).cyan();
-            let info = format!(
-                "{} {} {} {: <25} {}\n",
-                "√".green(),
-                stage,
-                emoji,
-                message,
-                elapsed,
-            );
-            let cursor_pos = cursor::position().unwrap();
-            execute!(stderr, MoveTo(origin_pos.0, origin_pos.1)).unwrap();
-            stderr.write_all(info.as_bytes()).unwrap();
-            execute!(stderr, MoveTo(cursor_pos.0, cursor_pos.1)).unwrap();
-        }
-        t.join().unwrap()
-    } else {
-        eprintln!("{}", format!("* {} {} {}", stage, emoji, message));
-        f()
-    }
-}
-
 pub(crate) fn execute_build(
     manifest_path: ManifestPath,
     use_gm: bool,
-    verbosity: Verbosity,
+    verbosity_behavior: VerbosityBehavior,
+    analysis_behavior: bool,
+    cg_path: &Option<PathBuf>,
 ) -> Result<String> {
     let started = Instant::now();
-    let terminal_size = terminal::size();
-    let current_pos = cursor::position();
-    let show_animation = matches!(verbosity, Verbosity::Quiet)
-        && match (terminal_size, current_pos) {
-            (Ok(terminal_size), Ok(current_pos)) => {
-                !(terminal_size.1 < 16 || terminal_size.1 - current_pos.1 < 16)
-            }
-            _ => false,
-        };
-    let crate_metadata;
 
-    {
-        let result = execute_task(
-            "[1/4]",
-            LOOKING_GLASS,
-            "Collecting crate metadata",
-            move || collect_crate_metadata(&manifest_path),
-            show_animation,
-        );
-        crate_metadata = Arc::new(result?);
-    }
+    println!("[1/5] {} Collecting crate metadata", LOOKING_GLASS);
+    let crate_metadata = collect_crate_metadata(&manifest_path)?;
 
-    {
-        let crate_metadata = crate_metadata.clone();
-        execute_task(
-            "[2/4]",
-            TRUCK,
-            "Building cargo project",
-            move || build_cargo_project(crate_metadata.as_ref(), use_gm, verbosity),
-            show_animation,
-        )?;
-    }
+    println!("[2/5] {} Building cargo project", TRUCK);
+    build_cargo_project(
+        &crate_metadata,
+        use_gm,
+        verbosity_behavior,
+        analysis_behavior,
+        cg_path,
+    )?;
+    /*
+        {
+            let crate_metadata = crate_metadata.clone();
+            execute_task("[3/4]", CLIP, "Optimizing Wasm bytecode", move || {
+                optimize_wasm(crate_metadata.as_ref())
+            })?;
+        }
 
-    {
-        let crate_metadata = crate_metadata.clone();
-        execute_task(
-            "[3/4]",
-            CLIP,
-            "Optimizing Wasm bytecode",
-            move || optimize_wasm(crate_metadata.as_ref()),
-            show_animation,
-        )?;
-    }
-
-    {
-        let crate_metadata = crate_metadata.clone();
-        execute_task(
-            "[4/4]",
-            PAPER,
-            "Generating ABI file",
-            move || generate_abi(crate_metadata.as_ref(), verbosity),
-            show_animation,
-        )?;
-    }
-
+        {
+            let crate_metadata = crate_metadata.clone();
+            execute_task("[4/4]", PAPER, "Generating ABI file", move || {
+                generate_abi(crate_metadata.as_ref(), verbosity_behavior)
+            })?;
+        }
+    */
     Ok(format!(
         "\n{}Done in {}, your project is ready now:\n{: >6}: {}\n{: >6}: {}",
         SPARKLE,

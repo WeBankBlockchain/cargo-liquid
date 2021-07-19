@@ -91,7 +91,7 @@ fn zip_dir(src_dir: &Path, dst_file: &Path) -> Result<()> {
                 zip.add_directory(name, options)?;
             }
         } else {
-            anyhow::bail!("the path contains invalid UTF-8 characters: `{:?}` ", name);
+            anyhow::bail!("the path contains invalid UTF-8 characters: `{:?}`", name);
         }
     }
     zip.finish()?;

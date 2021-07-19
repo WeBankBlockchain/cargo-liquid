@@ -21,6 +21,7 @@ use std::{
     path::PathBuf,
 };
 use structopt::{clap, StructOpt};
+use workspace::ManifestPath;
 
 #[derive(StructOpt)]
 #[structopt(bin_name = "cargo")]
@@ -41,31 +42,56 @@ pub(crate) struct Args {
 
 #[derive(StructOpt)]
 struct VerbosityFlags {
-    #[structopt(long)]
+    /// No output printed to stdout
+    #[structopt(short, long)]
     quiet: bool,
+    /// Use verbose output
     #[structopt(long)]
     verbose: bool,
 }
 
 #[derive(Copy, Clone)]
-enum Verbosity {
+enum VerbosityBehavior {
     Quiet,
     Verbose,
 }
 
-impl TryFrom<&VerbosityFlags> for Verbosity {
+impl Into<xargo_lib::Verbosity> for VerbosityBehavior {
+    fn into(self) -> xargo_lib::Verbosity {
+        match self {
+            Self::Verbose => xargo_lib::Verbosity::Verbose,
+            Self::Quiet => xargo_lib::Verbosity::Quiet,
+        }
+    }
+}
+
+impl TryFrom<&VerbosityFlags> for VerbosityBehavior {
     type Error = Error;
 
     fn try_from(value: &VerbosityFlags) -> Result<Self, Self::Error> {
         match (value.quiet, value.verbose) {
-            (true, false) => Ok(Verbosity::Quiet),
-            (false, false) => Ok(Verbosity::Quiet),
-            (false, true) => Ok(Verbosity::Verbose),
+            (true, false) => Ok(VerbosityBehavior::Quiet),
+            (false, false) => Ok(VerbosityBehavior::Quiet),
+            (false, true) => Ok(VerbosityBehavior::Verbose),
             (true, true) => anyhow::bail!("Cannot pass both --quiet and --verbose flags"),
         }
     }
 }
 
+// Since 1.40, cargo had stabilized a new feature named as `cache-messages`,
+// which caching all compiler's output into a local file mandatorily. When
+// cargo detects that there is no changing in dependents or source code, it
+// will simply redisplay the cached message to accelerate the building
+// process.
+//
+// This feature works fine in most of situation. But unfortunately, cargo will
+// cache the log produced by liquid-analy as well (because liquid-analy works
+// by inserting analysis callbacks into the compiler). This causes cargo
+// unconditionally displaying stale messages from the analyzer even the analyzer
+// never be started, which is sometimes misleading.
+//
+// To debug liquid-analy or adjust configuration of it, you can turn the
+// `enforce_analysis` flag on, otherwise you can just obey the default rule of cargo.
 #[derive(StructOpt)]
 enum Command {
     /// Setup and create a new liquid project
@@ -79,13 +105,23 @@ enum Command {
         #[structopt(short, long, parse(from_os_str))]
         target_dir: Option<PathBuf>,
     },
-    /// Compiles the project
+    /// Build the project
     #[structopt(name = "build")]
     Build {
         #[structopt(flatten)]
-        verbosity: VerbosityFlags,
-        #[structopt(short, long, help = "Indicates using GM mode or not")]
+        verbosity_flags: VerbosityFlags,
+        /// Indicates using GM mode or not
+        #[structopt(short, long)]
         gm: bool,
+        /// Indicates the manifest to use, must be a Cargo.toml file
+        #[structopt(short, long)]
+        manifest_path: Option<PathBuf>,
+        /// If this flag is set, the analysis process will be forced to started
+        #[structopt(long)]
+        enforce_analysis: bool,
+        /// If this flag is set, the analysis process will produce the whole call graph in dot format
+        #[structopt(short, long)]
+        dump_cfg: Option<PathBuf>,
     },
 }
 
@@ -104,8 +140,22 @@ fn exec(cmd: Command) -> Result<String> {
             name,
             target_dir,
         } => cmd::execute_new(ty, name, target_dir.as_ref()),
-        Command::Build { verbosity, gm } => {
-            cmd::execute_build(Default::default(), *gm, verbosity.try_into()?)
-        }
+        Command::Build {
+            verbosity_flags,
+            gm,
+            manifest_path,
+            enforce_analysis,
+            dump_cfg,
+        } => cmd::execute_build(
+            manifest_path
+                .as_ref()
+                .map_or(Default::default(), |manifest_path| {
+                    ManifestPath::new(manifest_path).expect("invalid manifest path")
+                }),
+            *gm,
+            verbosity_flags.try_into()?,
+            *enforce_analysis,
+            dump_cfg,
+        ),
     }
 }
