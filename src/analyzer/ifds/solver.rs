@@ -1,8 +1,14 @@
 use crate::control_flow::InterproceduralCFG;
-use crate::ifds::{binary_domain::BinaryDomain, problem::IfdsProblem};
+use crate::ifds::{
+    binary_domain::BinaryDomain,
+    problem::{FlowFunction, IfdsProblem},
+};
+use log::*;
+use std::fmt::Debug;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
+    marker::PhantomData,
 };
 
 /// An edge function computes how a domain value changes when flowing from one
@@ -71,7 +77,8 @@ impl EdgeFunction {
 /// ## Note
 /// Crucially, the IFDS solution algorithm computes such summaries only
 /// once for each method.
-struct PathEdge<Node, Fact> {
+#[derive(Debug)]
+struct PathEdge<Node: Debug, Fact: Debug> {
     src_fact: Fact,
     tgt: Node,
     tgt_fact: Fact,
@@ -86,17 +93,17 @@ struct PathEdge<Node, Fact> {
 /// jump functions are turned into summary functions.
 struct JumpFunctions<Node, Fact>
 where
-    Node: Eq + Hash + Copy,
-    Fact: Eq + Hash + Copy,
+    Node: Eq + Hash + Clone,
+    Fact: Eq + Hash + Clone,
 {
     /// mapping from target node and value to a list of all source values and
     /// associated functions where the list is implemented as a mapping from
     /// the source value to the function. We exclude empty default functions.
-    non_empty_reverse_lookup: HashMap<(Node, Fact), HashMap<Fact, EdgeFunction>>,
+    non_empty_reverse_lookup: HashMap<Node, HashMap<Fact, HashMap<Fact, EdgeFunction>>>,
     /// mapping from source value and target node to a list of all target values
     /// and associated functions where the list is implemented as a mapping from
     /// the source value to the function. We exclude empty default functions.
-    non_empty_forward_lookup: HashMap<(Fact, Node), HashMap<Fact, EdgeFunction>>,
+    non_empty_forward_lookup: HashMap<Fact, HashMap<Node, HashMap<Fact, EdgeFunction>>>,
     /// mapping from target node to a list of triples consisting of source value,
     /// target value and associated function, the triple is implemented by a mapping
     /// from the source value and target value to the function. We exclude empty
@@ -106,8 +113,8 @@ where
 
 impl<Node, Fact> JumpFunctions<Node, Fact>
 where
-    Node: Eq + Hash + Copy,
-    Fact: Eq + Hash + Copy,
+    Node: Eq + Hash + Clone,
+    Fact: Eq + Hash + Clone,
 {
     pub fn new() -> Self {
         Self {
@@ -131,14 +138,18 @@ where
         }
 
         self.non_empty_reverse_lookup
-            .entry((tgt, tgt_fact))
+            .entry(tgt.clone())
             .or_default()
-            .insert(src_fact, edge_fn);
+            .entry(tgt_fact.clone())
+            .or_default()
+            .insert(src_fact.clone(), edge_fn);
 
         self.non_empty_forward_lookup
-            .entry((src_fact, tgt))
+            .entry(src_fact.clone())
             .or_default()
-            .insert(tgt_fact, edge_fn);
+            .entry(tgt.clone())
+            .or_default()
+            .insert(tgt_fact.clone(), edge_fn);
 
         self.non_empty_lookup_by_target_node
             .entry(tgt)
@@ -151,10 +162,12 @@ where
     /// The return value is a mapping from source value to function.
     pub fn reverse_lookup(
         &self,
-        tgt: Node,
-        tgt_fact: Fact,
+        tgt: &Node,
+        tgt_fact: &Fact,
     ) -> Option<&HashMap<Fact, EdgeFunction>> {
-        self.non_empty_reverse_lookup.get(&(tgt, tgt_fact))
+        self.non_empty_reverse_lookup
+            .get(tgt)
+            .and_then(|inner| inner.get(tgt_fact))
     }
 
     /// Returns, for a given source value and target statement all
@@ -162,10 +175,12 @@ where
     /// The return value is a mapping from target value to function.
     pub fn forward_lookup(
         &self,
-        src_fact: Fact,
-        tgt: Node,
+        src_fact: &Fact,
+        tgt: &Node,
     ) -> Option<&HashMap<Fact, EdgeFunction>> {
-        self.non_empty_forward_lookup.get(&(src_fact, tgt))
+        self.non_empty_forward_lookup
+            .get(src_fact)
+            .and_then(|inner| inner.get(tgt))
     }
 
     /// Returns for a given target statement all jump function records with this target.
@@ -175,11 +190,10 @@ where
     }
 }
 
-pub struct IfdsSolver<'graph, Icfg, Problem>
+pub struct IfdsSolver<'graph, 'fact, Icfg, Problem>
 where
     Icfg: InterproceduralCFG,
-    Problem: IfdsProblem,
-    <Problem as IfdsProblem>::Fact: Copy,
+    Problem: IfdsProblem<'fact>,
 {
     icfg: &'graph Icfg,
     dump_esg: bool,
@@ -201,18 +215,20 @@ where
     /// In this implementation, here maintains a set `incoming` that records nodes that the
     /// analysis has observed to be reachable and predecessors of <sp, d1>. This solution is
     /// first proposed in Naeem, Lhotak and Rodriguez, 2010.
-    incomings: HashMap<(Icfg::Node, Problem::Fact), HashMap<Icfg::Node, HashSet<Problem::Fact>>>,
+    incomings:
+        HashMap<Icfg::Node, HashMap<Problem::Fact, HashMap<Icfg::Node, HashSet<Problem::Fact>>>>,
     /// Stores summaries that were queried before they were computed
-    end_summaries:
-        HashMap<(Icfg::Node, Problem::Fact), HashMap<(Icfg::Node, Problem::Fact), EdgeFunction>>,
-    values: HashMap<(Icfg::Node, Problem::Fact), BinaryDomain>,
+    end_summaries: HashMap<
+        Icfg::Node,
+        HashMap<Problem::Fact, HashMap<(Icfg::Node, Problem::Fact), EdgeFunction>>,
+    >,
+    values: HashMap<Icfg::Node, HashMap<Problem::Fact, BinaryDomain>>,
 }
 
-impl<'graph, Icfg, Problem> IfdsSolver<'graph, Icfg, Problem>
+impl<'graph, 'fact, Icfg, Problem> IfdsSolver<'graph, 'fact, Icfg, Problem>
 where
     Icfg: InterproceduralCFG,
-    Problem: IfdsProblem,
-    <Problem as IfdsProblem>::Fact: Copy,
+    Problem: IfdsProblem<'fact, Icfg = Icfg>,
 {
     pub fn new(problem: Problem, icfg: &'graph Icfg, dump_esg: bool) -> Self {
         let zero_value = Problem::zero_value();
@@ -231,25 +247,35 @@ where
     }
 
     // TODO: Processes edges in concurrent threads to improve performance.
-    pub fn solve(&mut self, entrance: &Icfg::Method) {
-        let initial_seeds = self.problem.initial_seeds(self.icfg, entrance);
+    pub fn solve(&mut self) {
+        let initial_seeds = self.problem.initial_seeds();
 
+        let zero_value = self.zero_value.clone();
         for (sp, facts_at_sp) in &initial_seeds {
             for fact_at_sp in facts_at_sp {
-                self.propagate(self.zero_value, *sp, *fact_at_sp, EdgeFunction::Identity);
+                self.propagate(
+                    zero_value.clone(),
+                    sp.clone(),
+                    fact_at_sp.clone(),
+                    EdgeFunction::Identity,
+                );
             }
             self.jump_functions.add_function(
-                self.zero_value,
-                *sp,
-                self.zero_value,
+                zero_value.clone(),
+                sp.clone(),
+                zero_value.clone(),
                 EdgeFunction::Identity,
             )
         }
 
         for (sp, facts_at_sp) in &initial_seeds {
             for fact_at_sp in facts_at_sp {
-                self.set_value(*sp, *fact_at_sp, BinaryDomain::bottom_element());
-                self.propagate_value(*sp, *fact_at_sp, &initial_seeds);
+                self.set_value(
+                    sp.clone(),
+                    fact_at_sp.clone(),
+                    BinaryDomain::bottom_element(),
+                );
+                self.propagate_value(sp.clone(), fact_at_sp.clone(), &initial_seeds);
             }
         }
 
@@ -258,12 +284,14 @@ where
         for node in non_call_or_start_nodes {
             let method = self.icfg.get_method_of(node);
             for sp in self.icfg.get_start_points_of(method) {
-                let related_jump_fns = self.jump_functions.lookup_by_target(*node);
+                let related_jump_fns = self.jump_functions.lookup_by_target(node.clone());
                 if let Some(related_jump_fns) = related_jump_fns {
                     for ((src_fact, tgt_fact), jump_fn) in related_jump_fns {
-                        let value = jump_fn.compute_target(self.get_value(*sp, *src_fact));
-                        let meet_value = self.get_value(*node, *tgt_fact).meet(&value);
-                        final_value.push((*node, *tgt_fact, meet_value));
+                        let value =
+                            jump_fn.compute_target(self.get_value(sp.clone(), src_fact.clone()));
+                        let meet_value =
+                            self.get_value(node.clone(), tgt_fact.clone()).meet(&value);
+                        final_value.push((node.clone(), tgt_fact.clone(), meet_value));
                     }
                 }
             }
@@ -272,6 +300,39 @@ where
         for (node, fact, value) in final_value {
             self.set_value(node, fact, value);
         }
+
+        debug!("all values after solved:");
+        for (node, facts_and_values) in &self.values {
+            debug!(
+                "at node `{:?}` of method `{:?}`",
+                node,
+                self.icfg.get_method_of(node)
+            );
+            for (fact, value) in facts_and_values {
+                debug!("\tfact: `{:?}`, value: `{:?}`", fact, value);
+            }
+        }
+    }
+
+    fn zeroed_results(
+        &self,
+        src_fact: &Problem::Fact,
+        mut tgt_facts: HashSet<Problem::Fact>,
+    ) -> HashSet<Problem::Fact> {
+        if src_fact == &self.zero_value {
+            tgt_facts.insert(self.zero_value.clone());
+        }
+        tgt_facts
+    }
+
+    pub fn get_results_at(&self, node: &Icfg::Node) -> HashSet<Problem::Fact> {
+        let mut results = HashSet::new();
+        for (fact, _) in &self.values[node] {
+            if fact != &self.zero_value {
+                results.insert(fact.clone());
+            }
+        }
+        results
     }
 
     /// Propagates the flow further down the exploded super graph, merging any edge
@@ -291,26 +352,53 @@ where
     ) {
         let jump_fn = self
             .jump_functions
-            .reverse_lookup(tgt, tgt_fact)
+            .reverse_lookup(&tgt, &tgt_fact)
             .and_then(|edge_fns| edge_fns.get(&src_fact))
             .map(|edge_fn| *edge_fn)
             .unwrap_or(EdgeFunction::AllTop);
         let prime_fn = jump_fn.meet_with(edge_fn);
         if prime_fn != jump_fn {
-            self.jump_functions
-                .add_function(src_fact, tgt, tgt_fact, prime_fn);
+            self.jump_functions.add_function(
+                src_fact.clone(),
+                tgt.clone(),
+                tgt_fact.clone(),
+                prime_fn,
+            );
 
             let path_edge = PathEdge {
                 src_fact,
-                tgt,
+                tgt: tgt.clone(),
                 tgt_fact,
             };
-            if self.icfg.is_call(&tgt) {
-                self.process_call(path_edge);
+
+            if self.icfg.is_exit(&tgt) {
+                debug!("process exit: {:?}", path_edge);
+                self.process_exit(path_edge);
             } else {
-                if self.icfg.is_exit(&tgt) {
-                    self.process_exit(path_edge);
+                if self.icfg.is_call(&tgt) {
+                    let callees = self.icfg.get_callees_of_call_at(&tgt);
+                    let mut process_as_normal = false;
+                    for callee in &callees {
+                        if self.icfg.is_special_method(callee) {
+                            assert!(
+                                callees.len() == 1,
+                                "we can't process virtual calling of special method {:?}",
+                                callee
+                            );
+                            // Treats invocation of special methods as special instructions,
+                            // because that their behavior can be pre-defined.
+                            process_as_normal = true;
+                        }
+                    }
+                    if process_as_normal {
+                        debug!("process call as normal: {:?}", path_edge);
+                        self.process_normal(path_edge);
+                    } else {
+                        debug!("process call: {:?}", path_edge);
+                        self.process_call(path_edge);
+                    }
                 } else {
+                    debug!("process normal: {:?}", path_edge);
                     self.process_normal(path_edge);
                 }
             }
@@ -327,7 +415,7 @@ where
 
         let jump_fn = self
             .jump_functions
-            .forward_lookup(src_fact, tgt)
+            .forward_lookup(&src_fact, &tgt)
             .and_then(|edge_fns| edge_fns.get(&tgt_fact))
             .map(|edge_fn| *edge_fn)
             .unwrap_or(EdgeFunction::AllTop);
@@ -335,36 +423,43 @@ where
         let callees = self.icfg.get_callees_of_call_at(&tgt);
 
         for callee in callees {
-            let call_flow_function = self.problem.get_call_flow_function(&tgt, &callee);
-            let facts_at_callee_sp = call_flow_function(&tgt_fact);
+            let call_flow_function = self.problem.get_call_flow_function(&tgt, callee);
+            let facts_at_callee_sp = self.zeroed_results(&tgt_fact, call_flow_function(&tgt_fact));
             let callee_sps = self.icfg.get_start_points_of(&callee);
             for callee_sp in callee_sps {
-                let callee_sp = *callee_sp;
                 if self.dump_esg {
-                    self.save_edges(tgt, callee_sp, tgt_fact, &facts_at_callee_sp, true);
+                    self.save_edges(
+                        tgt.clone(),
+                        callee_sp.clone(),
+                        tgt_fact.clone(),
+                        &facts_at_callee_sp,
+                        true,
+                    );
                 }
 
                 for fact_at_callee_sp in &facts_at_callee_sp {
-                    let fact_at_callee_sp = *fact_at_callee_sp;
                     self.propagate(
-                        fact_at_callee_sp,
-                        callee_sp,
-                        fact_at_callee_sp,
+                        fact_at_callee_sp.clone(),
+                        callee_sp.clone(),
+                        fact_at_callee_sp.clone(),
                         EdgeFunction::Identity,
                     );
 
                     // Registers the fact <callee_sp, fact_at_callee_sp> has an
                     // incoming edge from <tgt, tgt_fact>.
                     self.incomings
-                        .entry((callee_sp, fact_at_callee_sp))
+                        .entry(callee_sp.clone())
                         .or_default()
-                        .entry(tgt)
+                        .entry(fact_at_callee_sp.clone())
                         .or_default()
-                        .insert(tgt_fact);
+                        .entry(tgt.clone())
+                        .or_default()
+                        .insert(tgt_fact.clone());
 
                     let end_summary = self
                         .end_summaries
-                        .get(&(callee_sp, fact_at_callee_sp))
+                        .get(callee_sp)
+                        .and_then(|inner| inner.get(fact_at_callee_sp))
                         .map(|end_summary| end_summary.clone());
 
                     // For each already-queried exit value <callee_ep, fact_at_callee_ep>
@@ -380,7 +475,10 @@ where
                                     &callee_ep,
                                     return_site,
                                 );
-                                let facts_at_return_site = return_flow_function(&fact_at_callee_ep);
+                                let facts_at_return_site = self.zeroed_results(
+                                    &fact_at_callee_ep,
+                                    return_flow_function(&fact_at_callee_ep),
+                                );
                                 for fact_at_return_site in facts_at_return_site {
                                     // Updates the caller-side summary function
                                     let call_edge_fn = if tgt_fact == self.zero_value {
@@ -397,8 +495,8 @@ where
                                         .compose_with(summary_edge_fn)
                                         .compose_with(return_edge_fn);
                                     self.propagate(
-                                        src_fact,
-                                        *return_site,
+                                        src_fact.clone(),
+                                        return_site.clone(),
                                         fact_at_return_site,
                                         jump_fn.compose_with(prime_fn),
                                     );
@@ -415,9 +513,16 @@ where
             let call_to_return_flow_function = self
                 .problem
                 .get_call_to_return_flow_function(&tgt, &return_site);
-            let facts_at_return_site = call_to_return_flow_function(&tgt_fact);
+            let facts_at_return_site =
+                self.zeroed_results(&tgt_fact, call_to_return_flow_function(&tgt_fact));
             if self.dump_esg {
-                self.save_edges(tgt, *return_site, tgt_fact, &facts_at_return_site, true);
+                self.save_edges(
+                    tgt.clone(),
+                    return_site.clone(),
+                    tgt_fact.clone(),
+                    &facts_at_return_site,
+                    true,
+                );
             }
 
             for fact_at_return_site in facts_at_return_site {
@@ -426,7 +531,12 @@ where
                 } else {
                     EdgeFunction::Identity
                 };
-                self.propagate(src_fact, *return_site, fact_at_return_site, edge_fn)
+                self.propagate(
+                    src_fact.clone(),
+                    return_site.clone(),
+                    fact_at_return_site,
+                    edge_fn,
+                )
             }
         }
     }
@@ -441,25 +551,27 @@ where
 
         let jump_fn = self
             .jump_functions
-            .forward_lookup(src_fact, tgt)
+            .forward_lookup(&src_fact, &tgt)
             .and_then(|edge_fns| edge_fns.get(&tgt_fact))
             .map(|edge_fn| *edge_fn)
             .unwrap_or(EdgeFunction::AllTop);
 
         let callee = self.icfg.get_method_of(&tgt);
         let callee_sps = self.icfg.get_start_points_of(callee);
-        //for each of the callee's start points, determine incoming calls
+        // For each of the callee's start points, determine incoming calls
         for callee_sp in callee_sps {
             // Registers end summary
-            let callee_sp = *callee_sp;
             self.end_summaries
-                .entry((callee_sp, src_fact))
+                .entry(callee_sp.clone())
                 .or_default()
-                .insert((tgt, tgt_fact), jump_fn);
+                .entry(src_fact.clone())
+                .or_default()
+                .insert((tgt.clone(), tgt_fact.clone()), jump_fn);
 
             let call_site_with_facts = self
                 .incomings
-                .get(&(callee_sp, src_fact))
+                .get(callee_sp)
+                .and_then(|inner| inner.get(&src_fact))
                 .map(|call_site_with_facts| call_site_with_facts.clone())
                 .unwrap_or_default();
 
@@ -472,9 +584,16 @@ where
                         &tgt,
                         return_site,
                     );
-                    let facts_at_return_site = return_flow_function(&tgt_fact);
+                    let facts_at_return_site =
+                        self.zeroed_results(&tgt_fact, return_flow_function(&tgt_fact));
                     if self.dump_esg {
-                        self.save_edges(tgt, *return_site, tgt_fact, &facts_at_return_site, true);
+                        self.save_edges(
+                            tgt.clone(),
+                            return_site.clone(),
+                            tgt_fact.clone(),
+                            &facts_at_return_site,
+                            true,
+                        );
                     }
 
                     for fact_at_call_site in &facts_at_call_site {
@@ -500,15 +619,15 @@ where
                             // function.
                             let fact_and_jump_fns = self
                                 .jump_functions
-                                .reverse_lookup(call_site, *fact_at_call_site)
+                                .reverse_lookup(&call_site, fact_at_call_site)
                                 .map(|fact_and_jump_fns| fact_and_jump_fns.clone())
                                 .unwrap_or_default();
                             for (fact, jump_fn) in fact_and_jump_fns {
                                 if jump_fn != EdgeFunction::AllTop {
                                     self.propagate(
                                         fact,
-                                        *return_site,
-                                        *fact_at_return_site,
+                                        return_site.clone(),
+                                        fact_at_return_site.clone(),
                                         jump_fn.compose_with(prime_fn),
                                     );
                                 }
@@ -527,24 +646,40 @@ where
 
         let jump_fn = self
             .jump_functions
-            .forward_lookup(src_fact, tgt)
+            .forward_lookup(&src_fact, &tgt)
             .and_then(|edge_fns| edge_fns.get(&tgt_fact))
             .map(|edge_fn| *edge_fn)
             .unwrap_or(EdgeFunction::AllTop);
 
+        let normal_flow_function = self.problem.get_normal_flow_function(&tgt);
+        let facts_of_succ = self.zeroed_results(&tgt_fact, normal_flow_function(&tgt_fact));
         for succ in self.icfg.get_succs_of(&tgt) {
-            let normal_flow_function = self.problem.get_normal_flow_function(&tgt, &succ);
-            let facts_of_succ = normal_flow_function(&tgt_fact);
+            let method = self.icfg.get_method_of(succ);
+            if self.icfg.is_special_method(method) {
+                continue;
+            }
+
             if self.dump_esg {
-                self.save_edges(tgt, *succ, tgt_fact, &facts_of_succ, false);
+                self.save_edges(
+                    tgt.clone(),
+                    succ.clone(),
+                    tgt_fact.clone(),
+                    &facts_of_succ,
+                    false,
+                );
             }
             let prime_fn = jump_fn.compose_with(if tgt_fact == self.zero_value {
                 EdgeFunction::AllBottom
             } else {
                 EdgeFunction::Identity
             });
-            for fact_of_succ in facts_of_succ {
-                self.propagate(src_fact, *succ, fact_of_succ, prime_fn);
+            for fact_of_succ in &facts_of_succ {
+                self.propagate(
+                    src_fact.clone(),
+                    succ.clone(),
+                    fact_of_succ.clone(),
+                    prime_fn,
+                );
             }
         }
     }
@@ -568,7 +703,7 @@ where
             .or_default()
             .entry(src_fact)
             .or_default()
-            .extend(tgt_facts);
+            .extend(tgt_facts.clone());
     }
 
     fn propagate_value(
@@ -578,23 +713,27 @@ where
         initial_seeds: &HashMap<Icfg::Node, HashSet<Problem::Fact>>,
     ) {
         let mut new_tasks = vec![];
-
         if self.icfg.is_start_point(&node) || initial_seeds.contains_key(&node) {
             let method = self.icfg.get_method_of(&node);
             for call_site in self.icfg.get_call_sites_within(&method) {
-                let facts_and_jump_fns = self.jump_functions.forward_lookup(fact, *call_site);
+                let facts_and_jump_fns = self.jump_functions.forward_lookup(&fact, call_site);
                 if let Some(facts_and_jump_fns) = facts_and_jump_fns {
                     for (fact_at_call_site, jump_fn) in facts_and_jump_fns {
-                        let value = jump_fn.compute_target(self.get_value(node, fact));
-                        new_tasks.push((*call_site, *fact_at_call_site, value));
+                        let value =
+                            jump_fn.compute_target(self.get_value(node.clone(), fact.clone()));
+                        new_tasks.push((call_site.clone(), fact_at_call_site.clone(), value));
                     }
                 }
             }
         } else {
             if self.icfg.is_call(&node) {
                 for callee in self.icfg.get_callees_of_call_at(&node) {
+                    if self.icfg.is_special_method(callee) {
+                        continue;
+                    }
                     let call_flow_function = self.problem.get_call_flow_function(&node, callee);
-                    for fact_at_callee_sp in call_flow_function(&fact) {
+                    let facts_at_callee_sp = self.zeroed_results(&fact, call_flow_function(&fact));
+                    for fact_at_callee_sp in facts_at_callee_sp {
                         let call_edge_fn = if fact == self.zero_value {
                             EdgeFunction::AllBottom
                         } else {
@@ -602,8 +741,9 @@ where
                         };
 
                         for callee_sp in self.icfg.get_start_points_of(callee) {
-                            let value = call_edge_fn.compute_target(self.get_value(node, fact));
-                            new_tasks.push((*callee_sp, fact_at_callee_sp, value))
+                            let value = call_edge_fn
+                                .compute_target(self.get_value(node.clone(), fact.clone()));
+                            new_tasks.push((callee_sp.clone(), fact_at_callee_sp.clone(), value))
                         }
                     }
                 }
@@ -622,25 +762,35 @@ where
         value: BinaryDomain,
         initial_seeds: &HashMap<Icfg::Node, HashSet<Problem::Fact>>,
     ) {
-        let old_value = self.get_value(node, fact);
+        let old_value = self.get_value(node.clone(), fact.clone());
         let meet_value = old_value.meet(&value);
         if meet_value != old_value {
-            self.set_value(node, fact, meet_value);
+            self.set_value(node.clone(), fact.clone(), meet_value);
             self.propagate_value(node, fact, initial_seeds);
         }
     }
 
     fn set_value(&mut self, node: Icfg::Node, fact: Problem::Fact, value: BinaryDomain) {
         if value == BinaryDomain::top_element() {
-            self.values.remove(&(node, fact));
+            let mut empty_map = false;
+            if let Some(map) = self.values.get_mut(&node) {
+                map.remove(&fact);
+                if map.is_empty() {
+                    empty_map = true;
+                }
+            }
+            if empty_map {
+                self.values.remove(&node);
+            }
         } else {
-            self.values.insert((node, fact), value);
+            self.values.entry(node).or_default().insert(fact, value);
         }
     }
 
     fn get_value(&self, node: Icfg::Node, fact: Problem::Fact) -> BinaryDomain {
         self.values
-            .get(&(node, fact))
+            .get(&node)
+            .and_then(|map| map.get(&fact))
             .map(|value| *value)
             .unwrap_or(BinaryDomain::top_element())
     }

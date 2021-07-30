@@ -10,78 +10,126 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::control_flow::{EdgeKind, EdgeWeight, InterproceduralCFG, Method, Node};
-use either::*;
+use crate::control_flow::{utils, InterproceduralCFG};
 use log::*;
 use petgraph::{
     graph::{DiGraph, NodeIndex},
     visit::EdgeRef,
     Direction,
 };
-use rustc_hir::{def::DefKind, def_id::DefId, definitions::DefPathData};
+use rustc_hir::def_id::DefId;
+use rustc_middle::mir::BasicBlock;
+use rustc_middle::ty::{subst::SubstsRef, Ty};
 use rustc_middle::{
-    mir::{
-        BasicBlock, BasicBlockData, BindingForm, Body, ClearCrossCrate, ImplicitSelfKind, Local,
-        LocalInfo, START_BLOCK,
-    },
-    ty::{subst::InternalSubsts, DefIdTree, TyCtxt, TyKind, Visibility},
+    mir::{BasicBlockData, TerminatorKind, START_BLOCK},
+    ty::{subst::InternalSubsts, TyCtxt},
 };
 use std::{
     collections::HashMap,
     fmt, fs,
     io::{self, Write},
-    ops::{Deref, Index},
     path::Path,
 };
 
-#[derive(Debug)]
-pub struct MethodInfo {
-    pub mutable: bool,
-    pub visible: bool,
-    pub name: String,
+pub type MethodIndex = usize;
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct Method<'tcx> {
+    pub def_id: DefId,
+    pub substs: SubstsRef<'tcx>,
+    pub self_ty: Option<Ty<'tcx>>,
+    pub used_for_clone: bool,
+}
+
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub enum NodeKind {
+    Normal,
+    Call,
+    Start,
+    End,
+    Fake(utils::SpecialCause),
+}
+
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub struct Node {
+    pub basic_block: Option<BasicBlock>,
+    pub belongs_to: MethodIndex,
+    pub kind: NodeKind,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EdgeKind {
+    Normal,
+    Call,
+    Return,
+    CallToReturn,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct Edge<'tcx> {
+    pub container: Option<Method<'tcx>>,
+    pub kind: EdgeKind,
+    pub is_certain: bool,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct CallSite {
+    pub caller: MethodIndex,
+    pub bb_id: usize,
 }
 
 pub struct ForwardCFG<'tcx> {
     pub tcx: TyCtxt<'tcx>,
-    pub contract_methods: HashMap<DefId, MethodInfo>,
-    pub external_methods: HashMap<DefId, MethodInfo>,
-
-    pub(in crate::control_flow) method_start_point: HashMap<Method<'tcx>, Node<'tcx>>,
-    pub(in crate::control_flow) method_end_points: HashMap<Method<'tcx>, Vec<Node<'tcx>>>,
-    pub(in crate::control_flow) node_to_index: HashMap<Node<'tcx>, NodeIndex>,
-    pub(in crate::control_flow) method_basic_blocks:
-        HashMap<DefId, HashMap<BasicBlock, BasicBlockData<'tcx>>>,
-    inner_graph: DiGraph<Node<'tcx>, EdgeWeight<'tcx>>,
+    pub(in crate::control_flow) start_point: HashMap<MethodIndex, NodeIndex>,
+    pub(in crate::control_flow) end_points: HashMap<MethodIndex, Vec<NodeIndex>>,
+    pub(in crate::control_flow) methods: Vec<Method<'tcx>>,
+    pub(in crate::control_flow) graph: DiGraph<Node, Edge<'tcx>>,
+    pub(in crate::control_flow) node_to_index: HashMap<Node, NodeIndex>,
 }
 
 impl<'tcx> ForwardCFG<'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>) -> Self {
-        let (contract_methods, external_methods) = collect_method_infos(tcx);
         Self {
             tcx,
-            contract_methods,
-            external_methods,
-            method_start_point: Default::default(),
-            method_end_points: Default::default(),
+            methods: Default::default(),
+            start_point: Default::default(),
+            end_points: Default::default(),
             node_to_index: Default::default(),
-            inner_graph: Default::default(),
-            method_basic_blocks: Default::default(),
+            graph: Default::default(),
         }
     }
 
     #[inline]
-    pub fn add_node(&mut self, node: Node<'tcx>) -> NodeIndex {
-        self.inner_graph.add_node(node)
+    pub fn add_node(&mut self, node: Node) -> NodeIndex {
+        self.graph.add_node(node)
     }
 
     #[inline]
-    pub fn add_edge(&mut self, from: NodeIndex, to: NodeIndex, edge: EdgeWeight<'tcx>) {
-        self.inner_graph.add_edge(from, to, edge);
+    pub fn add_edge(&mut self, from: NodeIndex, to: NodeIndex, edge: Edge<'tcx>) {
+        self.graph.add_edge(from, to, edge);
+    }
+
+    #[inline]
+    pub fn get_method_by_def_id(&self, def_id: DefId) -> &Method<'tcx> {
+        self.methods
+            .iter()
+            .find(|method| method.def_id == def_id)
+            .unwrap()
+    }
+
+    #[inline]
+    pub fn get_method_index(&self, method: &Method<'tcx>) -> MethodIndex {
+        self.methods.iter().position(|m| m == method).unwrap()
+    }
+
+    #[inline]
+    pub fn get_method_by_index(&self, index: MethodIndex) -> &Method<'tcx> {
+        self.methods.get(index).unwrap()
     }
 
     /// Converts the call graph into DOT-described document
     /// and saves in a local file.
-    pub fn dump(&self, path: &Path, entry_points: &Vec<Method<'tcx>>) -> io::Result<()> {
+    pub fn dump(&self, path: &Path, ep_count: usize) -> io::Result<()> {
         #[derive(PartialEq, Eq)]
         enum EscapeMode {
             Dot,
@@ -146,7 +194,7 @@ impl<'tcx> ForwardCFG<'tcx> {
         writeln!(dot_file, "    rankdir=TB");
 
         let mut node_groups = HashMap::new();
-        for (i, node) in self.inner_graph.raw_nodes().iter().enumerate() {
+        for (i, node) in self.graph.raw_nodes().iter().enumerate() {
             let node = &node.weight;
             let belongs_to = node.belongs_to;
             node_groups
@@ -157,7 +205,7 @@ impl<'tcx> ForwardCFG<'tcx> {
 
         let mut edge_groups = HashMap::new();
         let mut cross_edges = vec![];
-        for edge in self.inner_graph.raw_edges() {
+        for edge in self.graph.raw_edges() {
             let src_idx = edge.source().index();
             let tgt_idx = edge.target().index();
             let weight = edge.weight;
@@ -172,8 +220,8 @@ impl<'tcx> ForwardCFG<'tcx> {
             }
         }
 
-        /*<tr><td colspan=\"3\">The foo, the bar and the baz</td></tr><tr><td colspan=\"3\">The foo, the bar and the baz</td></tr>*/
-        for (i, (method, nodes)) in node_groups.iter().enumerate() {
+        for (i, (method_index, nodes)) in node_groups.iter().enumerate() {
+            let method = self.get_method_by_index(*method_index);
             writeln!(dot_file, "    subgraph cluster_{} {{", i);
             writeln!(dot_file, "        label=<<table border='1' cellborder='1'>");
             {
@@ -209,19 +257,52 @@ impl<'tcx> ForwardCFG<'tcx> {
             writeln!(dot_file, "</table>>")?;
 
             for (i, node) in nodes {
+                let method = self.get_method_by_index(node.belongs_to);
                 use std::fmt::Write;
-                let BasicBlockData {
-                    ref statements,
-                    ref terminator,
-                    ..
-                } = self.method_basic_blocks[&node.belongs_to.def_id][&node.basic_block];
                 write!(dot_file, "        {} [label=\"", i);
+
                 let mut escaper = Escaper::new(&mut dot_file, EscapeMode::Dot);
-                for statement in statements {
-                    write!(escaper, "{:?};\n", statement);
-                }
-                if let Some(terminator) = terminator {
-                    write!(escaper, "{:?};\n", terminator.kind);
+
+                match node.kind {
+                    NodeKind::Call => {
+                        let basic_block = node.basic_block.unwrap();
+                        write!(escaper, "bb{}(call-counterpart):\n", basic_block.as_usize());
+                        let terminator = self.tcx.optimized_mir(method.def_id).basic_blocks()
+                            [basic_block]
+                            .terminator
+                            .as_ref();
+                        // For call nodes, don't print the statements but only print `Call` terminator.
+                        if let Some(terminator) = terminator {
+                            write!(escaper, "{:?};\n", terminator.kind);
+                        }
+                    }
+                    NodeKind::Normal => {
+                        let basic_block = node.basic_block.unwrap();
+                        write!(escaper, "bb{}:\n", basic_block.as_usize());
+                        let BasicBlockData {
+                            ref statements,
+                            ref terminator,
+                            ..
+                        } = self.tcx.optimized_mir(method.def_id).basic_blocks()[basic_block];
+
+                        for statement in statements {
+                            write!(escaper, "{:?};\n", statement);
+                        }
+                        if let Some(terminator) = terminator {
+                            if !matches!(terminator.kind, TerminatorKind::Call { .. }) {
+                                write!(escaper, "{:?};\n", terminator.kind);
+                            }
+                        }
+                    }
+                    NodeKind::Start => {
+                        write!(escaper, "start node");
+                    }
+                    NodeKind::End => {
+                        write!(escaper, "end node");
+                    }
+                    NodeKind::Fake(cause) => {
+                        write!(escaper, "{:?}", cause);
+                    }
                 }
                 writeln!(dot_file, "\"]");
             }
@@ -259,171 +340,66 @@ impl<'tcx> ForwardCFG<'tcx> {
         }
 
         writeln!(dot_file, "    start [shape=Mdiamond]");
-        let entry_point_indices = entry_points.iter().fold(vec![], |mut acc, entry_point| {
-            acc.push(self.node_to_index[&self.method_start_point[&entry_point]]);
+        let ep_indices = (0..ep_count).fold(vec![], |mut acc, ep_index| {
+            acc.push(self.start_point[&ep_index]);
             acc
         });
-        for entry_point_index in entry_point_indices {
-            writeln!(dot_file, "    start -> {}", entry_point_index.index());
+        for ep_index in ep_indices {
+            writeln!(dot_file, "    start -> {}", ep_index.index());
         }
         writeln!(dot_file, "}}")
     }
 }
-
-fn collect_method_infos<'tcx>(
-    tcx: TyCtxt<'tcx>,
-) -> (HashMap<DefId, MethodInfo>, HashMap<DefId, MethodInfo>) {
-    let mut contract_methods = HashMap::new();
-    let mut external_methods = HashMap::new();
-    for local_def_id in tcx.body_owners() {
-        let def_id = local_def_id.to_def_id();
-
-        match get_method_info(tcx, def_id) {
-            Some(Left(method_info)) => {
-                debug!("found contract method: {:?}", def_id);
-                contract_methods.insert(def_id, method_info);
-            }
-            Some(Right(method_info)) => {
-                debug!("found external method: {:?}", def_id);
-                external_methods.insert(def_id, method_info);
-            }
-            _ => (),
-        }
-    }
-    (contract_methods, external_methods)
-}
-
-fn get_method_info<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    def_id: DefId,
-) -> Option<Either<MethodInfo, MethodInfo>> {
-    const STORAGE_DEF_PATH: [&str; 3] = ["Storage", "__liquid_storage", "__liquid_private"];
-    const INTERFACE_DEF_PATH: [&str; 3] = ["Interface", "__liquid_interface", "__liquid_private"];
-
-    let def_ty = tcx.type_of(def_id);
-    let ty_kind = def_ty.kind().clone();
-    if !matches!(ty_kind, TyKind::FnDef(..)) {
-        return None;
-    }
-
-    // `Body` is the lowered representation of a single function.
-    let body = tcx.optimized_mir(def_id);
-    let parent_id = tcx.parent(def_id);
-    if parent_id.is_none() {
-        return None;
-    }
-
-    let parent_id = parent_id.unwrap();
-    let parent_kind = tcx.def_kind(parent_id);
-    if parent_kind != DefKind::Impl {
-        return None;
-    }
-
-    if tcx.impl_trait_ref(parent_id).is_some() {
-        return None;
-    }
-
-    let name = String::from(tcx.item_name(def_id).as_str().deref());
-    if name.starts_with("__liquid") {
-        return None;
-    }
-
-    let parent_type = tcx.type_of(parent_id);
-    if let TyKind::Adt(adt_def, ..) = parent_type.kind() {
-        let def_path_suffix = tcx
-            .def_path(adt_def.did)
-            .data
-            .iter()
-            .rev()
-            .take(3)
-            .filter_map(|disambiguated_def_path_data| {
-                if let DefPathData::TypeNs(symbol) = disambiguated_def_path_data.data {
-                    Some(symbol.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let is_mutable = |body: &Body<'tcx>| {
-            let arg_count = body.arg_count;
-            debug_assert!(arg_count >= 1);
-            let local_decls = &body.local_decls;
-            // `_0` is the return value, `_1` is the first argument.
-            let receiver = &local_decls[Local::from_usize(1)];
-
-            if let Some(box LocalInfo::User(ClearCrossCrate::Set(BindingForm::ImplicitSelf(
-                self_kind,
-            )))) = &receiver.local_info
-            {
-                match self_kind {
-                    ImplicitSelfKind::MutRef => true,
-                    _ => false,
-                }
-            } else {
-                false
-            }
-        };
-
-        if def_path_suffix == STORAGE_DEF_PATH {
-            let visible = tcx.visibility(def_id) == Visibility::Public;
-            let mutable = is_mutable(body);
-            return Some(Left(MethodInfo {
-                mutable,
-                visible,
-                name,
-            }));
-        }
-
-        if def_path_suffix == INTERFACE_DEF_PATH {
-            if name != "at" {
-                let mutable = is_mutable(body);
-                return Some(Right(MethodInfo {
-                    mutable,
-                    visible: true,
-                    name,
-                }));
-            }
-        }
-    }
-    None
-}
-
 impl<'tcx> InterproceduralCFG for ForwardCFG<'tcx> {
-    type Node = Node<'tcx>;
+    type Node = Node;
     type Method = Method<'tcx>;
 
     fn get_start_points_of(&self, method: &Self::Method) -> Vec<&Self::Node> {
-        vec![self.method_start_point.index(method)]
+        debug!("get_start_points_of {:?}", method);
+        let method_index = self.get_method_index(method);
+        let start_point = self.start_point[&method_index];
+        vec![self.graph.node_weight(start_point).unwrap()]
     }
 
     fn get_end_points_of(&self, method: &Self::Method) -> Vec<&Self::Node> {
-        self.method_end_points[method].iter().collect()
+        let method_index = self.get_method_index(method);
+        self.end_points[&method_index]
+            .iter()
+            .map(|node_index| self.graph.node_weight(*node_index).unwrap())
+            .collect()
     }
 
     fn is_call(&self, node: &Self::Node) -> bool {
-        let node_index = self.node_to_index[node];
-        self.inner_graph
-            .edges_directed(node_index, Direction::Outgoing)
-            .all(|edge| edge.weight().kind == EdgeKind::Call)
+        node.kind == NodeKind::Call
     }
 
     fn is_exit(&self, node: &Self::Node) -> bool {
-        let node_index = self.node_to_index[node];
-        self.inner_graph
-            .edges_directed(node_index, Direction::Outgoing)
-            .all(|edge| edge.weight().kind == EdgeKind::Return)
+        node.kind == NodeKind::End
     }
 
     fn is_start_point(&self, node: &Self::Node) -> bool {
-        node.basic_block == START_BLOCK
+        node.kind == NodeKind::Start
+    }
+
+    fn is_special_method(&self, method: &Self::Method) -> bool {
+        utils::is_special_method(self.tcx, method.def_id).is_some()
+    }
+
+    fn get_preds_of(&self, node: &Self::Node) -> Vec<&Self::Node> {
+        let node_index = self.node_to_index[node];
+        self.graph
+            .edges_directed(node_index, Direction::Incoming)
+            .filter(|edge| !matches!(edge.weight().kind, EdgeKind::Call | EdgeKind::Return))
+            .map(|edge| self.graph.node_weight(edge.source()).unwrap())
+            .collect()
     }
 
     fn get_succs_of(&self, node: &Self::Node) -> Vec<&Self::Node> {
         let node_index = self.node_to_index[node];
-        self.inner_graph
-            .neighbors_directed(node_index, Direction::Outgoing)
-            .map(|neighbor| self.inner_graph.node_weight(neighbor).unwrap())
+        self.graph
+            .edges_directed(node_index, Direction::Outgoing)
+            .filter(|edge| !matches!(edge.weight().kind, EdgeKind::Call | EdgeKind::Return))
+            .map(|edge| self.graph.node_weight(edge.target()).unwrap())
             .collect()
     }
 
@@ -431,11 +407,11 @@ impl<'tcx> InterproceduralCFG for ForwardCFG<'tcx> {
         debug_assert!(self.is_call(node));
 
         let node_index = self.node_to_index[node];
-        self.inner_graph
+        self.graph
             .edges(node_index)
             .filter_map(|edge| {
                 if edge.weight().kind == EdgeKind::CallToReturn {
-                    let node = self.inner_graph.node_weight(edge.target()).unwrap();
+                    let node = self.graph.node_weight(edge.target()).unwrap();
                     Some(node)
                 } else {
                     None
@@ -448,30 +424,47 @@ impl<'tcx> InterproceduralCFG for ForwardCFG<'tcx> {
         debug_assert!(self.is_call(node));
 
         let node_index = self.node_to_index[node];
-        self.inner_graph
+        self.graph
             .edges(node_index)
             .filter_map(|edge| {
                 if edge.weight().kind == EdgeKind::Call {
-                    let node = self.inner_graph.node_weight(edge.target()).unwrap();
+                    let node = self.graph.node_weight(edge.target()).unwrap();
                     Some(&node.belongs_to)
                 } else {
                     None
                 }
             })
+            .map(|method_index| self.get_method_by_index(*method_index))
             .collect()
     }
 
-    fn get_method_of<'a>(&self, node: &'a Self::Node) -> &'a Self::Method {
-        &node.belongs_to
+    fn get_method_of<'a>(&'a self, node: &'a Self::Node) -> &Self::Method {
+        self.get_method_by_index(node.belongs_to)
+    }
+
+    fn get_nodes_of(&self, method: &Self::Method) -> Vec<&Self::Node> {
+        let method_index = self.methods.iter().position(|m| m == method).unwrap();
+        self.graph
+            .raw_nodes()
+            .iter()
+            .filter_map(|node| {
+                let node = &node.weight;
+                if node.belongs_to == method_index {
+                    Some(node)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
     }
 
     fn get_call_sites_within(&self, method: &Self::Method) -> Vec<&Self::Node> {
         let mut call_sites = vec![];
         for node in self
-            .inner_graph
+            .graph
             .raw_nodes()
             .iter()
-            .filter(|node| &node.weight.belongs_to == method)
+            .filter(|node| self.get_method_by_index(node.weight.belongs_to) == method)
         {
             if self.is_call(&node.weight) {
                 call_sites.push(&node.weight);
@@ -481,17 +474,119 @@ impl<'tcx> InterproceduralCFG for ForwardCFG<'tcx> {
     }
 
     fn get_non_call_and_start_nodes(&self) -> Vec<&Self::Node> {
-        self.inner_graph
+        self.graph
             .raw_nodes()
             .iter()
             .filter_map(|node| {
                 let node = &node.weight;
-                if self.is_call(node) || self.is_start_point(node) {
+                if self.is_call(node)
+                    || self.is_start_point(node)
+                    || matches!(node.kind, NodeKind::Fake(..))
+                {
                     None
                 } else {
                     Some(node)
                 }
             })
             .collect()
+    }
+
+    fn get_non_call_and_end_nodes(&self) -> Vec<&Self::Node> {
+        self.graph
+            .raw_nodes()
+            .iter()
+            .filter_map(|node| {
+                let node = &node.weight;
+                if self.is_call(node)
+                    || self.is_exit(node)
+                    || matches!(node.kind, NodeKind::Fake(..))
+                {
+                    None
+                } else {
+                    Some(node)
+                }
+            })
+            .collect()
+    }
+}
+
+pub struct BackwardCFG<'graph, 'tcx> {
+    pub fwd_cfg: &'graph ForwardCFG<'tcx>,
+}
+
+impl<'graph, 'tcx> BackwardCFG<'graph, 'tcx> {
+    pub fn new(fwd_cfg: &'graph ForwardCFG<'tcx>) -> Self {
+        Self { fwd_cfg }
+    }
+
+    #[inline]
+    pub fn get_method_by_index(&self, index: MethodIndex) -> &Method<'tcx> {
+        self.fwd_cfg.methods.get(index).unwrap()
+    }
+}
+
+impl<'graph, 'tcx> InterproceduralCFG for BackwardCFG<'graph, 'tcx> {
+    type Node = <ForwardCFG<'tcx> as InterproceduralCFG>::Node;
+    type Method = <ForwardCFG<'tcx> as InterproceduralCFG>::Method;
+
+    fn get_start_points_of(&self, method: &Self::Method) -> Vec<&Self::Node> {
+        self.fwd_cfg.get_end_points_of(method)
+    }
+
+    fn get_end_points_of(&self, method: &Self::Method) -> Vec<&Self::Node> {
+        self.fwd_cfg.get_start_points_of(method)
+    }
+
+    fn is_call(&self, node: &Self::Node) -> bool {
+        self.fwd_cfg.is_call(node)
+    }
+
+    fn is_exit(&self, node: &Self::Node) -> bool {
+        self.fwd_cfg.is_start_point(node)
+    }
+
+    fn is_start_point(&self, node: &Self::Node) -> bool {
+        self.fwd_cfg.is_exit(node)
+    }
+
+    fn is_special_method(&self, method: &Self::Method) -> bool {
+        self.fwd_cfg.is_special_method(method)
+    }
+
+    fn get_preds_of(&self, node: &Self::Node) -> Vec<&Self::Node> {
+        self.fwd_cfg.get_succs_of(node)
+    }
+
+    fn get_succs_of(&self, node: &Self::Node) -> Vec<&Self::Node> {
+        self.fwd_cfg.get_preds_of(node)
+    }
+
+    fn get_return_sites_of_call_at(&self, node: &Self::Node) -> Vec<&Self::Node> {
+        debug_assert!(self.is_call(node));
+        self.fwd_cfg.get_preds_of(node)
+    }
+
+    fn get_callees_of_call_at(&self, node: &Self::Node) -> Vec<&Self::Method> {
+        self.fwd_cfg.get_callees_of_call_at(node)
+    }
+
+    fn get_method_of<'a>(&'a self, node: &'a Self::Node) -> &Self::Method {
+        self.fwd_cfg.get_method_of(node)
+    }
+
+    fn get_nodes_of(&self, method: &Self::Method) -> Vec<&Self::Node> {
+        self.fwd_cfg.get_nodes_of(method)
+    }
+
+    fn get_call_sites_within(&self, method: &Self::Method) -> Vec<&Self::Node> {
+        self.fwd_cfg.get_call_sites_within(method)
+    }
+
+    fn get_non_call_and_start_nodes(&self) -> Vec<&Self::Node> {
+        self.fwd_cfg.get_non_call_and_end_nodes()
+    }
+
+    fn get_non_call_and_end_nodes(&self) -> Vec<&Self::Node> {
+        self.fwd_cfg.get_non_call_and_start_nodes()
     }
 }

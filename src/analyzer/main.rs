@@ -1,5 +1,7 @@
 #![feature(rustc_private)]
 #![feature(box_patterns)]
+#![feature(backtrace)]
+#![feature(backtrace_frames)]
 
 extern crate rustc_driver;
 extern crate rustc_hir;
@@ -54,7 +56,7 @@ fn main() {
 
             let result = rustc_driver::catch_fatal_errors(|| {
                 info!("analysis process started");
-                trace!("command provided for analysis: {:?}", args.join(" "));
+                debug!("command provided for analysis: {:?}", args.join(" "));
 
                 let always_encode_mir = String::from("always-encode-mir");
                 if !args.iter().any(|arg| arg.ends_with(&always_encode_mir)) {

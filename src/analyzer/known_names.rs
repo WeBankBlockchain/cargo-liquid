@@ -12,7 +12,10 @@ pub enum KnownNames {
     CoreOpsFunctionFnCall,
     CoreOpsFunctionFnCallMut,
     CoreOpsFunctionFnOnceCallOnce,
-    Alloc,
+    RustAlloc,
+    RustAllocZeroed,
+    RustDealloc,
+    RustRealloc,
     LiquidIntrinsicsRequire,
     LiquidStorageCollectionsMappingInitialize,
     LiquidStorageCollectionsMappingLen,
@@ -33,26 +36,23 @@ impl KnownNames {
         let data_path = &tcx.def_path(def_id);
         let path_iter = data_path.data.iter();
         match crate_name.as_str().deref() {
-            "alloc" => KnownNames::Alloc,
+            "alloc" => Self::get_known_name_for_alloc_crate(path_iter),
             "core" => Self::get_known_name_for_core_crate(path_iter),
             "liquid_lang" => Self::get_known_name_for_liquid_crate(path_iter),
             _ => KnownNames::None,
         }
     }
 
-    pub fn is_known_name_for_liquid(name: Self) -> bool {
-        matches!(
-            name,
-            KnownNames::LiquidIntrinsicsRequire
-                | KnownNames::LiquidStorageCollectionsMappingInitialize
-                | KnownNames::LiquidStorageCollectionsMappingLen
-                | KnownNames::LiquidStorageCollectionsMappingInsert
-                | KnownNames::LiquidStorageCollectionsMappingContainsKey
-                | KnownNames::LiquidStorageCollectionsMappingIndex
-                | KnownNames::LiquidStorageCollectionsMappingIndexMut
-                | KnownNames::LiquidStorageCollectionsMappingGet
-                | KnownNames::LiquidStorageCollectionsMappingGetMut
-        )
+    fn get_known_name_for_alloc_crate(mut path_iter: PathIter<'_>) -> Self {
+        Self::get_def_data_path_elem_name(path_iter.next())
+            .map(|name| match name.as_str().deref() {
+                "__rust_alloc" => Self::RustAlloc,
+                "__rust_alloc_zeroed" => Self::RustAllocZeroed,
+                "__rust_dealloc" => Self::RustDealloc,
+                "__rust_realloc" => Self::RustRealloc,
+                _ => KnownNames::None,
+            })
+            .unwrap_or(KnownNames::None)
     }
 
     fn get_known_name_for_core_crate(mut path_iter: PathIter<'_>) -> Self {

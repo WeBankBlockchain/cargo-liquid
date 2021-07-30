@@ -1,15 +1,18 @@
 use crate::control_flow::InterproceduralCFG;
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Debug,
     hash::Hash,
+    iter::FromIterator,
 };
 
 pub type FlowFunction<Fact> = Box<dyn FnOnce(&Fact) -> HashSet<Fact>>;
 
-pub trait IfdsProblem {
+pub trait IfdsProblem<'fact> {
+    type Icfg: InterproceduralCFG;
     /// `Fact` represents logical statement, such as "variable `v` has definitely
     /// been initialized".
-    type Fact: Eq + Hash + Copy;
+    type Fact: Eq + Hash + Clone + Debug;
 
     /// This must be a data-flow fact of type `Fact`, but must **NOT** be
     /// part of the domain of data-flow facts. Typically this will be a
@@ -24,13 +27,9 @@ pub trait IfdsProblem {
 
     /// Returns initial seeds to be used for the analysis. This is a mapping
     /// of nodes to initial analysis facts.
-    fn initial_seeds<Icfg>(
+    fn initial_seeds(
         &self,
-        icfg: &Icfg,
-        entrance: &Icfg::Method,
-    ) -> HashMap<Icfg::Node, HashSet<Self::Fact>>
-    where
-        Icfg: InterproceduralCFG;
+    ) -> HashMap<<Self::Icfg as InterproceduralCFG>::Node, HashSet<Self::Fact>>;
 
     /// Returns the flow function that computes the flow for a call statement.
     ///
@@ -38,10 +37,10 @@ pub trait IfdsProblem {
     /// - `call_site`: The node containing the invoke expression giving rise to
     ///   this call;
     /// - `callee`: The concrete target method for which the flow is computed.
-    fn get_call_flow_function<Node, Method>(
+    fn get_call_flow_function(
         &self,
-        call_site: &Node,
-        callee: &Method,
+        call_site: &<Self::Icfg as InterproceduralCFG>::Node,
+        callee: &<Self::Icfg as InterproceduralCFG>::Method,
     ) -> FlowFunction<Self::Fact>;
 
     /// Returns the flow function that computes the flow for a an exit from a
@@ -58,12 +57,12 @@ pub trait IfdsProblem {
     /// - `return_site`: One of the successor node of the `call_site`. There may be
     ///   multiple successors in case of possible exceptional flow. This
     ///   method will be called for each such successor.
-    fn get_return_flow_function<Node, Method>(
+    fn get_return_flow_function(
         &self,
-        call_site: &Node,
-        callee: &Method,
-        exit_site: &Node,
-        return_site: &Node,
+        call_site: &<Self::Icfg as InterproceduralCFG>::Node,
+        callee: &<Self::Icfg as InterproceduralCFG>::Method,
+        exit_site: &<Self::Icfg as InterproceduralCFG>::Node,
+        return_site: &<Self::Icfg as InterproceduralCFG>::Node,
     ) -> FlowFunction<Self::Fact>;
 
     /// Returns the flow function that computes the flow for a normal node,
@@ -71,11 +70,11 @@ pub trait IfdsProblem {
     /// edge.
     ///
     /// ## Parameters
-    /// - `curr`: The current statement.
-    /// - `succ`: The successor for which the flow is computed. This value can
-    ///   be used to compute a branched analysis that propagates different values
-    ///   depending on where control flow branches.
-    fn get_normal_flow_function<Node>(&self, curr: &Node, succ: &Node) -> FlowFunction<Self::Fact>;
+    /// - `curr`: The current node.
+    fn get_normal_flow_function(
+        &mut self,
+        curr: &<Self::Icfg as InterproceduralCFG>::Node,
+    ) -> FlowFunction<Self::Fact>;
 
     /// Returns the flow function that computes the flow from a call site to a
     /// successor statement just after the call. There may be multiple successors
@@ -88,9 +87,17 @@ pub trait IfdsProblem {
     /// - `return_site`: The return site to which the information is propagated.
     ///   For exceptional flow, this may actually be the start of an exception
     ///   handler, e.g. stack unwind basic block in MIR.
-    fn get_call_to_return_flow_function<Node>(
+    fn get_call_to_return_flow_function(
         &self,
-        call_site: &Node,
-        return_site: &Node,
+        call_site: &<Self::Icfg as InterproceduralCFG>::Node,
+        return_site: &<Self::Icfg as InterproceduralCFG>::Node,
     ) -> FlowFunction<Self::Fact>;
+
+    fn empty() -> FlowFunction<Self::Fact> {
+        Box::new(|_fact: &Self::Fact| HashSet::new())
+    }
+
+    fn identity() -> FlowFunction<Self::Fact> {
+        Box::new(|fact: &Self::Fact| HashSet::from_iter([fact.clone()]))
+    }
 }

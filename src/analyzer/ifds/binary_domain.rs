@@ -1,4 +1,4 @@
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum BinaryDomain {
     /// The bottom element is used to initialize the function computation at entry points.
     Bottom,
