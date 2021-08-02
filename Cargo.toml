@@ -26,6 +26,8 @@ log = "*"
 log-derive = "*"
 petgraph = "*"
 either = "*"
+serde = "1.0"
+serde_json = "1.0"
 
 [build-dependencies]
 anyhow = "1.0.32"

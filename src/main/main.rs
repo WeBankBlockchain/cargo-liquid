@@ -42,10 +42,10 @@ pub(crate) struct Args {
 
 #[derive(StructOpt)]
 struct VerbosityFlags {
-    /// No output printed to stdout
+    /// No output printed to stdout.
     #[structopt(short, long)]
     quiet: bool,
-    /// Use verbose output
+    /// Uses verbose output.
     #[structopt(long)]
     verbose: bool,
 }
@@ -54,6 +54,23 @@ struct VerbosityFlags {
 enum VerbosityBehavior {
     Quiet,
     Verbose,
+}
+
+#[derive(StructOpt)]
+struct AnalysisFlags {
+    /// If this flag is set, the analysis process will be forced to started.
+    #[structopt(long)]
+    enforce_analysis: bool,
+    /// If this flag is set, the analysis process will be skipped unconditionally.
+    #[structopt(long)]
+    skip_analysis: bool,
+}
+
+#[derive(PartialEq, Eq, Copy, Clone)]
+enum AnalysisBehavior {
+    Skip,
+    Enforce,
+    Default,
 }
 
 impl Into<xargo_lib::Verbosity> for VerbosityBehavior {
@@ -78,6 +95,21 @@ impl TryFrom<&VerbosityFlags> for VerbosityBehavior {
     }
 }
 
+impl TryFrom<&AnalysisFlags> for AnalysisBehavior {
+    type Error = Error;
+
+    fn try_from(value: &AnalysisFlags) -> Result<Self, Self::Error> {
+        match (value.skip_analysis, value.enforce_analysis) {
+            (true, false) => Ok(AnalysisBehavior::Skip),
+            (false, false) => Ok(AnalysisBehavior::Default),
+            (false, true) => Ok(AnalysisBehavior::Enforce),
+            (true, true) => {
+                anyhow::bail!("Cannot pass both --skip-analysis and --enforce-analysis flags")
+            }
+        }
+    }
+}
+
 // Since 1.40, cargo had stabilized a new feature named as `cache-messages`,
 // which caching all compiler's output into a local file mandatorily. When
 // cargo detects that there is no changing in dependents or source code, it
@@ -94,32 +126,31 @@ impl TryFrom<&VerbosityFlags> for VerbosityBehavior {
 // `enforce_analysis` flag on, otherwise you can just obey the default rule of cargo.
 #[derive(StructOpt)]
 enum Command {
-    /// Setup and create a new liquid project
+    /// Sets up and creates a new liquid project.
     #[structopt(name = "new")]
     New {
-        /// The type of the project, must be `contract` or `collaboration`
+        /// The type of the project, must be `contract` or `collaboration`.
         ty: String,
-        /// The name of the newly created project
+        /// The name of the newly created project.
         name: String,
-        /// The optional target directory for the newly created project
+        /// The optional target directory for the newly created project.
         #[structopt(short, long, parse(from_os_str))]
         target_dir: Option<PathBuf>,
     },
-    /// Build the project
+    /// Builds the project.
     #[structopt(name = "build")]
     Build {
         #[structopt(flatten)]
         verbosity_flags: VerbosityFlags,
-        /// Indicates using GM mode or not
+        /// Indicates using GM mode or not.
         #[structopt(short, long)]
         gm: bool,
-        /// Indicates the manifest to use, must be a Cargo.toml file
+        /// Indicates the manifest to use, must be a Cargo.toml file.
         #[structopt(short, long)]
         manifest_path: Option<PathBuf>,
-        /// If this flag is set, the analysis process will be forced to started
-        #[structopt(long)]
-        enforce_analysis: bool,
-        /// If this flag is set, the analysis process will produce the whole call graph in dot format
+        #[structopt(flatten)]
+        analysis_flags: AnalysisFlags,
+        /// If this flag is set, the analysis process will produce the whole call graph in dot format.
         #[structopt(short, long)]
         dump_cfg: Option<PathBuf>,
     },
@@ -144,8 +175,8 @@ fn exec(cmd: Command) -> Result<String> {
             verbosity_flags,
             gm,
             manifest_path,
-            enforce_analysis,
             dump_cfg,
+            analysis_flags,
         } => cmd::execute_build(
             manifest_path
                 .as_ref()
@@ -154,7 +185,7 @@ fn exec(cmd: Command) -> Result<String> {
                 }),
             *gm,
             verbosity_flags.try_into()?,
-            *enforce_analysis,
+            analysis_flags.try_into()?,
             dump_cfg,
         ),
     }

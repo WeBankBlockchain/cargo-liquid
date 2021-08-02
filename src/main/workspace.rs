@@ -364,9 +364,9 @@ impl Workspace {
 
     /// Copy the workspace with amended manifest files to a temporary directory, executing the
     /// supplied function with the root manifest path before the directory is cleaned up.
-    pub fn using_temp<F>(&mut self, f: F) -> Result<()>
+    pub fn using_temp<F, R>(&mut self, f: F) -> Result<R>
     where
-        F: FnOnce(&ManifestPath) -> Result<()>,
+        F: FnOnce(&ManifestPath) -> Result<R>,
     {
         let tmp_dir = tempfile::Builder::new()
             .prefix(".cargo-contract_")

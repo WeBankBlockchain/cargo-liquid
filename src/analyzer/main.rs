@@ -20,9 +20,11 @@ mod known_names;
 use log::*;
 use rustc_session::config::ErrorOutputType;
 use rustc_session::early_error;
-use std::env;
-use std::io::{self, Write};
-use std::process::{self, Command};
+use std::{
+    env,
+    io::{self, Write},
+    process::{self, Command},
+};
 
 fn main() {
     let mut args = env::args_os()

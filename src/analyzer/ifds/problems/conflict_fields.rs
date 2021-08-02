@@ -24,8 +24,8 @@ use std::{
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub struct AccessPath {
-    base: Local,
-    fields: Vec<usize>,
+    pub base: Local,
+    pub fields: Vec<usize>,
 }
 
 impl<'tcx> TryFrom<&'tcx Place<'tcx>> for AccessPath {
@@ -76,7 +76,7 @@ impl From<KnownNames> for EnvKind {
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub enum Key {
-    Runtime,
+    All,
     Len,
     Env(EnvKind),
     Var(DefId, AccessPath),
@@ -597,7 +597,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                                     Either::Right(constant) => Key::Const(constant.clone()),
                                 }
                             } else {
-                                Key::Runtime
+                                Key::All
                             };
                             results.insert(ConflictField::Field {
                                 container: *container,

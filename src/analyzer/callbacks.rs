@@ -15,11 +15,8 @@ extern crate rustc_interface;
 extern crate rustc_middle;
 
 use crate::{
-    control_flow::{BackwardCFG, Builder, ForwardCFG, InterproceduralCFG},
-    ifds::{
-        problems::{ConflictFields, UninitializedStates},
-        IfdsSolver,
-    },
+    control_flow::{BackwardCFG, Builder, ForwardCFG, InterproceduralCFG, MethodIndex},
+    ifds::{problems::*, IfdsSolver},
 };
 use either::*;
 use log::*;
@@ -27,10 +24,11 @@ use rustc_driver::Compilation;
 use rustc_hir::{def::DefKind, def_id::DefId, definitions::DefPathData};
 use rustc_interface::{interface::Compiler, Queries};
 use rustc_middle::{
-    mir::{BindingForm, Body, ClearCrossCrate, ImplicitSelfKind, Local, LocalInfo},
-    ty::{DefIdTree, TyCtxt, TyKind, Visibility},
+    mir::{BindingForm, Body, ClearCrossCrate, ImplicitSelfKind, Local, LocalInfo, Mutability},
+    ty::{DefIdTree, Ty, TyCtxt, TyKind, Visibility},
 };
-use std::{collections::HashMap, ops::Deref, path::PathBuf};
+use serde::Serialize;
+use std::{collections::HashMap, env, fs, ops::Deref, path::PathBuf};
 
 #[derive(Debug)]
 pub struct MethodAttr {
@@ -69,6 +67,152 @@ impl rustc_driver::Callbacks for AnalysisCallbacks {
 }
 
 impl AnalysisCallbacks {
+    fn analyze_conflict_fields<'tcx>(
+        &self,
+        methods: Vec<MethodIndex>,
+        tcx: TyCtxt<'tcx>,
+        fwd_cfg: &ForwardCFG<'tcx>,
+        storage_ty: Ty<'tcx>,
+    ) {
+        #[derive(Serialize, PartialOrd, Ord, PartialEq, Eq)]
+        struct FieldDesc {
+            /// The index of which state variable will be visited.
+            slot: usize,
+            /// - 0 represents `All`, which means the contract attempts to visit a container of
+            /// `Value<T>` or the key for reading/writing other types of containers can not be
+            /// inferred during static program analysis;
+            /// - 1 represents `Len`, which means the contract may change length of some a container.
+            /// It's only meaningful to containers such like `Vec<T>`, `Mapping<K, V>` or
+            /// `IterableMapping<K, V>`;
+            /// - 2 represents `Env`, which means the contract wants to use some values from
+            /// execution context as keys to visit containers;
+            /// - 3 represents `Var`, which means the contract wants to use some values from method
+            /// parameters as keys to visit containers;
+            /// - 4 represents `Const`, which means the contract wants to use some constant values as
+            /// keys to visit containers.
+            kind: u8,
+            /// If `kind` equals to `All` or `Len`, then `path` must be empty;
+            /// if `kind` equals to `Env`, then `path` must only contain one element, and the element
+            /// represents which kind of context information the contract needs to acquire:
+            ///  - 0 represents caller of transaction;
+            ///  - 1 represents origin sender of transaction;
+            ///  - 2 represents timestamp of current block;
+            ///  - 3 represents height of current block;
+            ///  - 4 represents address of current contract;
+            /// if `kind` equals to `Var`, then `path` contains an access path described via integer
+            /// indices, e.g., "[2, 0]" means key coming from the **1st** data member of the **2nd**
+            /// parameter;
+            /// if `kind` equals to `Const`, the `path` contains the **raw** bytes representation of
+            /// the corresponding constant value.
+            path: Vec<usize>,
+            /// Whether this conflict field is used to mutably visit some a state variable.
+            read_only: bool,
+        }
+
+        let target_dir = PathBuf::from(env::var("LIQUID_ANALYSIS_TARGET_DIR").unwrap());
+        let bwd_cfg = BackwardCFG::new(&fwd_cfg);
+        let mut field_descs = HashMap::new();
+
+        for method_index in methods {
+            let method = bwd_cfg.get_method_by_index(method_index);
+            let problem = ConflictFields::new(tcx, &bwd_cfg, method_index, storage_ty);
+            let mut ifds_solver = IfdsSolver::new(problem, &bwd_cfg, true);
+            ifds_solver.solve();
+            let end_point = bwd_cfg.get_end_points_of(method);
+            debug_assert!(end_point.len() == 1);
+            let end_point = end_point[0];
+            let results = ifds_solver.get_results_at(end_point);
+
+            let method_id = method.def_id;
+            let fn_name = tcx.item_name(method_id);
+            let fn_name = format!("{}", fn_name.as_str());
+            let mut conflict_fields = results
+                .iter()
+                .map(|conflict_field| {
+                    if let ConflictField::Field {
+                        container,
+                        key,
+                        read_only,
+                    } = conflict_field
+                    {
+                        let (kind, path) = match key {
+                            Key::All | Key::Len => (0, vec![]),
+                            Key::Env(env_kind) => (
+                                1,
+                                vec![match env_kind {
+                                    EnvKind::Caller => 0,
+                                    EnvKind::Origin => 1,
+                                    EnvKind::Now => 2,
+                                    EnvKind::BlockNumber => 3,
+                                    EnvKind::Address => 4,
+                                }],
+                            ),
+                            Key::Var(def_id, access_path) => {
+                                if def_id != &method_id {
+                                    (0, vec![])
+                                } else {
+                                    let body = tcx.optimized_mir(method_id);
+                                    let arg_count = body.arg_count;
+                                    let local_decls = &body.local_decls;
+                                    let base = access_path.base;
+                                    if base.index() > arg_count {
+                                        (0, vec![])
+                                    } else {
+                                        if local_decls[base].mutability == Mutability::Not {
+                                            let mut path = vec![base.index() - 2];
+                                            path.extend(access_path.fields.iter());
+                                            (3, path)
+                                        } else {
+                                            (0, vec![])
+                                        }
+                                    }
+                                }
+                            }
+                            Key::Const(bytes) => (
+                                4,
+                                bytes.iter().map(|byte| *byte as usize).collect::<Vec<_>>(),
+                            ),
+                        };
+
+                        FieldDesc {
+                            slot: *container,
+                            kind,
+                            path,
+                            read_only: *read_only,
+                        }
+                    } else {
+                        unreachable!()
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            conflict_fields.sort();
+            conflict_fields.dedup();
+            field_descs.insert(fn_name, conflict_fields);
+        }
+
+        fs::write(
+            target_dir.join("conflict_fields.analysis"),
+            format!("{}", serde_json::to_string(&field_descs).unwrap()),
+        )
+        .unwrap();
+    }
+
+    fn analyze_uninitialized_states<'tcx>(
+        &self,
+        constructor: MethodIndex,
+        tcx: TyCtxt<'tcx>,
+        fwd_cfg: &ForwardCFG<'tcx>,
+        storage_ty: Ty<'tcx>,
+    ) {
+        let problem = UninitializedStates::new(tcx, &fwd_cfg, constructor, storage_ty);
+        let mut ifds_solver = IfdsSolver::new(problem, &fwd_cfg, true);
+        ifds_solver.solve();
+        let constructor = fwd_cfg.get_method_by_index(constructor);
+        let results = ifds_solver.get_results_at(&fwd_cfg.get_end_points_of(constructor)[0]);
+        debug!("uninitialized state variables results: {:?}", results);
+    }
+
     fn analyze_with_mir<'tcx>(&mut self, _: &Compiler, tcx: TyCtxt<'tcx>) {
         let (contract_methods, external_methods) = Self::collect_method_attrs(tcx);
         let mut fwd_cfg = ForwardCFG::new(tcx);
@@ -117,12 +261,7 @@ impl AnalysisCallbacks {
             .collect::<Vec<_>>();
         debug_assert!(constructor.len() == 1);
         let constructor = constructor[0];
-        let problem = UninitializedStates::new(tcx, &fwd_cfg, constructor, storage_ty);
-        let mut ifds_solver = IfdsSolver::new(problem, &fwd_cfg, true);
-        ifds_solver.solve();
-        let constructor = fwd_cfg.get_method_by_index(constructor);
-        let results = ifds_solver.get_results_at(&fwd_cfg.get_end_points_of(constructor)[0]);
-        debug!("uninitialized state variables results: {:?}", results);
+        self.analyze_uninitialized_states(constructor, tcx, &fwd_cfg, storage_ty);
 
         let mutable_contract_methods = entry_points
             .iter()
@@ -136,22 +275,7 @@ impl AnalysisCallbacks {
                 }
             })
             .collect::<Vec<_>>();
-        let bwd_cfg = BackwardCFG::new(&fwd_cfg);
-        for method_index in mutable_contract_methods {
-            let method = bwd_cfg.get_method_by_index(method_index);
-            let problem = ConflictFields::new(tcx, &bwd_cfg, method_index, storage_ty);
-            let mut ifds_solver = IfdsSolver::new(problem, &bwd_cfg, true);
-            ifds_solver.solve();
-            let end_point = bwd_cfg.get_end_points_of(method);
-            debug_assert!(end_point.len() == 1);
-            let end_point = end_point[0];
-            let results = ifds_solver.get_results_at(end_point);
-            debug!(
-                "conflict fields results for `{:?}`: {:?}",
-                tcx.item_name(method.def_id),
-                results
-            );
-        }
+        self.analyze_conflict_fields(mutable_contract_methods, tcx, &fwd_cfg, storage_ty);
     }
 
     fn collect_method_attrs<'tcx>(
