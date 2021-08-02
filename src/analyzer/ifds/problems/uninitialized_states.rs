@@ -62,7 +62,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for UninitializedStates<'tcx, 'graph> {
     }
 
     fn initial_seeds(
-        &self,
+        &mut self,
     ) -> HashMap<<Self::Icfg as InterproceduralCFG>::Node, HashSet<Self::Fact>> {
         let constructor = self.icfg.get_method_by_index(self.constructor);
         let start_points = self.icfg.get_start_points_of(constructor);
@@ -78,27 +78,27 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for UninitializedStates<'tcx, 'graph> {
     }
 
     fn get_call_flow_function(
-        &self,
+        &mut self,
         _call_site: &<Self::Icfg as InterproceduralCFG>::Node,
         _callee: &<Self::Icfg as InterproceduralCFG>::Method,
-    ) -> FlowFunction<Self::Fact> {
+    ) -> FlowFunction<'tcx, Self::Fact> {
         Self::identity()
     }
 
     fn get_return_flow_function(
-        &self,
+        &mut self,
         _call_site: &<Self::Icfg as InterproceduralCFG>::Node,
         _callee: &<Self::Icfg as InterproceduralCFG>::Method,
         _exit_site: &<Self::Icfg as InterproceduralCFG>::Node,
         _return_site: &<Self::Icfg as InterproceduralCFG>::Node,
-    ) -> FlowFunction<Self::Fact> {
+    ) -> FlowFunction<'tcx, Self::Fact> {
         Self::identity()
     }
 
     fn get_normal_flow_function(
         &mut self,
         curr: &<Self::Icfg as InterproceduralCFG>::Node,
-    ) -> FlowFunction<Self::Fact> {
+    ) -> FlowFunction<'tcx, Self::Fact> {
         if curr.basic_block.is_none() {
             return Self::identity();
         }
@@ -175,10 +175,10 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for UninitializedStates<'tcx, 'graph> {
     }
 
     fn get_call_to_return_flow_function(
-        &self,
+        &mut self,
         _call_site: &<Self::Icfg as InterproceduralCFG>::Node,
         _return_site: &<Self::Icfg as InterproceduralCFG>::Node,
-    ) -> FlowFunction<Self::Fact> {
+    ) -> FlowFunction<'tcx, Self::Fact> {
         // The state variables may be initialized in other functions, if we merge the result coming
         // from other functions with facts we have seen in current context, the final result will
         // be misleading.

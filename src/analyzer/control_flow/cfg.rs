@@ -21,7 +21,7 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::mir::BasicBlock;
 use rustc_middle::ty::{subst::SubstsRef, Ty};
 use rustc_middle::{
-    mir::{BasicBlockData, TerminatorKind, START_BLOCK},
+    mir::{BasicBlockData, TerminatorKind},
     ty::{subst::InternalSubsts, TyCtxt},
 };
 use std::{

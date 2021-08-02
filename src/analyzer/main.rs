@@ -9,6 +9,7 @@ extern crate rustc_infer;
 extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
+extern crate rustc_target;
 extern crate rustc_trait_selection;
 
 mod callbacks;
@@ -49,8 +50,10 @@ fn main() {
             .any(|(i, arg)| arg == &"--crate-name" && args.get(i + 1) == Some(&project_name))
         {
             if env::var("RUST_LOG").is_ok() {
+                let mut builder = env_logger::Builder::from_default_env();
+                builder.target(env_logger::Target::Stderr);
+                builder.init();
                 rustc_driver::init_rustc_env_logger();
-                let _ = env_logger::try_init();
             }
             rustc_driver::install_ice_hook();
 

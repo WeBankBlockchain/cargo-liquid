@@ -6,7 +6,7 @@ use std::{
     iter::FromIterator,
 };
 
-pub type FlowFunction<Fact> = Box<dyn FnOnce(&Fact) -> HashSet<Fact>>;
+pub type FlowFunction<'a, Fact> = Box<dyn Fn(&Fact) -> HashSet<Fact> + 'a>;
 
 pub trait IfdsProblem<'fact> {
     type Icfg: InterproceduralCFG;
@@ -28,7 +28,7 @@ pub trait IfdsProblem<'fact> {
     /// Returns initial seeds to be used for the analysis. This is a mapping
     /// of nodes to initial analysis facts.
     fn initial_seeds(
-        &self,
+        &mut self,
     ) -> HashMap<<Self::Icfg as InterproceduralCFG>::Node, HashSet<Self::Fact>>;
 
     /// Returns the flow function that computes the flow for a call statement.
@@ -38,10 +38,10 @@ pub trait IfdsProblem<'fact> {
     ///   this call;
     /// - `callee`: The concrete target method for which the flow is computed.
     fn get_call_flow_function(
-        &self,
+        &mut self,
         call_site: &<Self::Icfg as InterproceduralCFG>::Node,
         callee: &<Self::Icfg as InterproceduralCFG>::Method,
-    ) -> FlowFunction<Self::Fact>;
+    ) -> FlowFunction<'fact, Self::Fact>;
 
     /// Returns the flow function that computes the flow for a an exit from a
     /// method. An exit can be a return or an exceptional exit.
@@ -58,12 +58,12 @@ pub trait IfdsProblem<'fact> {
     ///   multiple successors in case of possible exceptional flow. This
     ///   method will be called for each such successor.
     fn get_return_flow_function(
-        &self,
+        &mut self,
         call_site: &<Self::Icfg as InterproceduralCFG>::Node,
         callee: &<Self::Icfg as InterproceduralCFG>::Method,
         exit_site: &<Self::Icfg as InterproceduralCFG>::Node,
         return_site: &<Self::Icfg as InterproceduralCFG>::Node,
-    ) -> FlowFunction<Self::Fact>;
+    ) -> FlowFunction<'fact, Self::Fact>;
 
     /// Returns the flow function that computes the flow for a normal node,
     /// the "normal" means that this node doesn't have a call or exit outgoing
@@ -74,7 +74,7 @@ pub trait IfdsProblem<'fact> {
     fn get_normal_flow_function(
         &mut self,
         curr: &<Self::Icfg as InterproceduralCFG>::Node,
-    ) -> FlowFunction<Self::Fact>;
+    ) -> FlowFunction<'fact, Self::Fact>;
 
     /// Returns the flow function that computes the flow from a call site to a
     /// successor statement just after the call. There may be multiple successors
@@ -88,16 +88,16 @@ pub trait IfdsProblem<'fact> {
     ///   For exceptional flow, this may actually be the start of an exception
     ///   handler, e.g. stack unwind basic block in MIR.
     fn get_call_to_return_flow_function(
-        &self,
+        &mut self,
         call_site: &<Self::Icfg as InterproceduralCFG>::Node,
         return_site: &<Self::Icfg as InterproceduralCFG>::Node,
-    ) -> FlowFunction<Self::Fact>;
+    ) -> FlowFunction<'fact, Self::Fact>;
 
-    fn empty() -> FlowFunction<Self::Fact> {
+    fn empty() -> FlowFunction<'fact, Self::Fact> {
         Box::new(|_fact: &Self::Fact| HashSet::new())
     }
 
-    fn identity() -> FlowFunction<Self::Fact> {
+    fn identity() -> FlowFunction<'fact, Self::Fact> {
         Box::new(|fact: &Self::Fact| HashSet::from_iter([fact.clone()]))
     }
 }

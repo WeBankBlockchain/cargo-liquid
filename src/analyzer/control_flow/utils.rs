@@ -48,12 +48,7 @@ pub enum SpecialCause {
 }
 
 pub fn is_special_method<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Option<SpecialCause> {
-    if !tcx.is_mir_available(def_id) {
-        return Some(SpecialCause::NoMir);
-    }
-
     let known_name = KnownNames::get(tcx, def_id);
-
     if matches!(
         known_name,
         KnownNames::LiquidIntrinsicsRequire
@@ -65,12 +60,13 @@ pub fn is_special_method<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Option<Speci
             | KnownNames::LiquidStorageCollectionsMappingIndexMut
             | KnownNames::LiquidStorageCollectionsMappingGet
             | KnownNames::LiquidStorageCollectionsMappingGetMut
+            | KnownNames::LiquidEnvGetCaller
             | KnownNames::RustAlloc
-            | KnownNames::RustAllocZeroed
-            | KnownNames::RustDealloc
-            | KnownNames::RustRealloc
     ) {
-        Some(SpecialCause::Predefined)
+        return Some(SpecialCause::Predefined);
+    }
+    if !tcx.is_mir_available(def_id) {
+        Some(SpecialCause::NoMir)
     } else {
         None
     }

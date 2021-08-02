@@ -73,7 +73,18 @@ impl AnalysisCallbacks {
         let (contract_methods, external_methods) = Self::collect_method_attrs(tcx);
         let mut fwd_cfg = ForwardCFG::new(tcx);
         let mut cfg_builder = Builder::new(&mut fwd_cfg);
-        let entry_points = contract_methods.keys().collect::<Vec<_>>();
+        let entry_points = contract_methods
+            .iter()
+            .filter_map(
+                |(def_id, attr)| {
+                    if attr.visible {
+                        Some(def_id)
+                    } else {
+                        None
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
         cfg_builder.build(entry_points.as_slice());
 
         if let Some(ref cfg_path) = self.cfg_path {

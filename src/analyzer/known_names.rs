@@ -13,9 +13,6 @@ pub enum KnownNames {
     CoreOpsFunctionFnCallMut,
     CoreOpsFunctionFnOnceCallOnce,
     RustAlloc,
-    RustAllocZeroed,
-    RustDealloc,
-    RustRealloc,
     LiquidIntrinsicsRequire,
     LiquidStorageCollectionsMappingInitialize,
     LiquidStorageCollectionsMappingLen,
@@ -25,6 +22,11 @@ pub enum KnownNames {
     LiquidStorageCollectionsMappingIndexMut,
     LiquidStorageCollectionsMappingGet,
     LiquidStorageCollectionsMappingGetMut,
+    LiquidEnvGetCaller,
+    LiquidEnvGetOrigin,
+    LiquidEnvNow,
+    LiquidEnvGetAddress,
+    LiquidEnvGetBlockNumber,
     None,
 }
 
@@ -43,16 +45,10 @@ impl KnownNames {
         }
     }
 
-    fn get_known_name_for_alloc_crate(mut path_iter: PathIter<'_>) -> Self {
-        Self::get_def_data_path_elem_name(path_iter.next())
-            .map(|name| match name.as_str().deref() {
-                "__rust_alloc" => Self::RustAlloc,
-                "__rust_alloc_zeroed" => Self::RustAllocZeroed,
-                "__rust_dealloc" => Self::RustDealloc,
-                "__rust_realloc" => Self::RustRealloc,
-                _ => KnownNames::None,
-            })
-            .unwrap_or(KnownNames::None)
+    fn get_known_name_for_alloc_crate(mut _path_iter: PathIter<'_>) -> Self {
+        // Ignores all allocating operations such as `__rust_alloc`, `__rust__dealloc`, etc.
+        // For now we don't modeling the behavior of heap allocation.
+        Self::RustAlloc
     }
 
     fn get_known_name_for_core_crate(mut path_iter: PathIter<'_>) -> Self {
@@ -94,6 +90,7 @@ impl KnownNames {
             .map(|name| match name.as_str().deref() {
                 "intrinsics" => Self::get_known_name_for_liquid_intrinsics(path_iter),
                 "lang_core" => Self::get_known_name_for_liquid_core(path_iter),
+                "env_access" => Self::get_known_name_for_liquid_env(path_iter),
                 _ => KnownNames::None,
             })
             .unwrap_or(KnownNames::None)
@@ -115,6 +112,23 @@ impl KnownNames {
                 _ => KnownNames::None,
             })
             .unwrap_or(KnownNames::None)
+    }
+
+    fn get_known_name_for_liquid_env(mut path_iter: PathIter<'_>) -> Self {
+        if let Some(DisambiguatedDefPathData { data: Impl, .. }) = path_iter.next() {
+            Self::get_def_data_path_elem_name(path_iter.next())
+                .map(|n| match n.as_str().deref() {
+                    "get_caller" => KnownNames::LiquidEnvGetCaller,
+                    "get_tx_origin" => KnownNames::LiquidEnvGetOrigin,
+                    "now" => KnownNames::LiquidEnvNow,
+                    "get_address" => KnownNames::LiquidEnvGetAddress,
+                    "get_block_number" => KnownNames::LiquidEnvGetBlockNumber,
+                    _ => KnownNames::None,
+                })
+                .unwrap_or(KnownNames::None)
+        } else {
+            KnownNames::None
+        }
     }
 
     fn get_known_name_for_liquid_storage(mut path_iter: PathIter<'_>) -> Self {

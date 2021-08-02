@@ -1,25 +1,96 @@
-use crate::control_flow::{AndersonPFG, BackwardCFG, InterproceduralCFG, MethodIndex};
-use crate::ifds::problem::{FlowFunction, IfdsProblem};
-use crate::known_names::KnownNames;
+use crate::{
+    control_flow::{AndersonPFG, BackwardCFG, InterproceduralCFG, Method, MethodIndex},
+    ifds::problem::{FlowFunction, IfdsProblem},
+    known_names::KnownNames,
+};
 use either::*;
 #[allow(unused_imports)]
 use log::*;
 use rustc_middle::{
     mir::{
-        BasicBlockData, BorrowKind, Local, Operand, Rvalue, StatementKind, TerminatorKind,
-        RETURN_PLACE,
+        interpret::{AllocRange, ConstValue, GlobalAlloc, Scalar},
+        BorrowKind, Constant, ConstantKind, Local, Mutability, Operand, Place, PlaceElem, Rvalue,
+        StatementKind, TerminatorKind, RETURN_PLACE,
     },
-    ty::{Ty, TyCtxt, TyKind},
+    ty::{ConstKind, ParamEnv, ScalarInt, Ty, TyCtxt, TyKind},
 };
 use rustc_span::def_id::DefId;
-use std::collections::{HashMap, HashSet};
-use std::iter::FromIterator;
+use rustc_target::abi::Size;
+use std::{
+    collections::{HashMap, HashSet},
+    convert::TryFrom,
+    iter::FromIterator,
+};
+
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub struct AccessPath {
+    base: Local,
+    fields: Vec<usize>,
+}
+
+impl<'tcx> TryFrom<&'tcx Place<'tcx>> for AccessPath {
+    type Error = ();
+    fn try_from(value: &'tcx Place<'tcx>) -> Result<Self, Self::Error> {
+        let base = value.local;
+        let mut fields = vec![];
+        for place_elem in value.projection {
+            match place_elem {
+                PlaceElem::Field(field, _) => fields.push(field.as_usize()),
+                PlaceElem::Downcast(_, variant_idx) => fields.push(variant_idx.as_usize()),
+                _ => return Err(()),
+            }
+        }
+        Ok(AccessPath { base, fields })
+    }
+}
 
 pub struct ConflictFields<'tcx, 'graph> {
     tcx: TyCtxt<'tcx>,
     icfg: &'graph BackwardCFG<'graph, 'tcx>,
     pfg: AndersonPFG<'graph, 'tcx>,
     entry_point: MethodIndex,
+    pub var_defs: HashMap<DefId, HashMap<Local, Vec<AccessPath>>>,
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+pub enum EnvKind {
+    Caller,
+    Origin,
+    Now,
+    BlockNumber,
+    Address,
+}
+
+impl From<KnownNames> for EnvKind {
+    fn from(fn_name: KnownNames) -> Self {
+        match fn_name {
+            KnownNames::LiquidEnvGetCaller => EnvKind::Caller,
+            KnownNames::LiquidEnvGetOrigin => EnvKind::Origin,
+            KnownNames::LiquidEnvNow => EnvKind::Now,
+            KnownNames::LiquidEnvGetAddress => EnvKind::Address,
+            KnownNames::LiquidEnvGetBlockNumber => EnvKind::BlockNumber,
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub enum Key {
+    Runtime,
+    Len,
+    Env(EnvKind),
+    Var(DefId, AccessPath),
+    Const(Vec<u8>),
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub enum ConflictField {
+    Zero,
+    Field {
+        container: usize,
+        key: Key,
+        read_only: bool,
+    },
 }
 
 impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
@@ -38,38 +109,351 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                 icfg,
                 pfg,
                 entry_point,
+                var_defs: Default::default(),
             }
         } else {
             unreachable!("`Storage` should be a struct type")
         }
     }
-}
 
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub enum EnvKind {
-    Caller,
-    Origin,
-    Timestamp,
-    BlockNumber,
-    Address,
-}
+    fn insert_var_defs(&mut self, method: &Method<'tcx>) {
+        let def_id = method.def_id;
+        if self.var_defs.contains_key(&def_id) {
+            return;
+        }
+        self.var_defs.entry(def_id).or_default();
+        let body = self.tcx.optimized_mir(def_id);
+        let basic_blocks = body.basic_blocks();
 
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub enum Key {
-    Runtime,
-    Len,
-    Env(EnvKind),
-    AccessPath(DefId, Local),
-}
+        let mut record_def =
+            |l_local: Local, r_local: Local, projection: &'tcx [PlaceElem<'tcx>]| {
+                let mut fields = vec![];
+                for place_elem in projection {
+                    match place_elem {
+                        PlaceElem::Field(field, _) => fields.push(field.as_usize()),
+                        PlaceElem::Downcast(_, variant_idx) => fields.push(variant_idx.as_usize()),
+                        _ => return,
+                    }
+                }
+                self.var_defs
+                    .get_mut(&def_id)
+                    .unwrap()
+                    .entry(l_local)
+                    .or_default()
+                    .push(AccessPath {
+                        base: r_local,
+                        fields,
+                    });
+            };
 
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub enum ConflictField {
-    Zero,
-    Field {
-        container: usize,
-        key: Key,
-        read_only: bool,
-    },
+        for bb in basic_blocks.indices() {
+            let stmts = &basic_blocks[bb].statements;
+            for stmt in stmts {
+                match &stmt.kind {
+                    StatementKind::Assign(box (l_place, r_value)) => {
+                        if l_place.projection.len() == 0 {
+                            match r_value {
+                                Rvalue::Use(r_operand) => match r_operand {
+                                    Operand::Move(r_place) | Operand::Copy(r_place) => {
+                                        record_def(
+                                            l_place.local,
+                                            r_place.local,
+                                            r_place.projection,
+                                        );
+                                    }
+                                    _ => (),
+                                },
+                                Rvalue::Ref(_, borrow_kind, r_place) => {
+                                    if borrow_kind == &BorrowKind::Shared {
+                                        let last_proj = r_place.as_ref().last_projection();
+                                        if let Some((_, last_proj)) = last_proj {
+                                            if last_proj == PlaceElem::Deref {
+                                                record_def(
+                                                    l_place.local,
+                                                    r_place.local,
+                                                    &r_place.projection[1..],
+                                                );
+                                            } else {
+                                                record_def(
+                                                    l_place.local,
+                                                    r_place.local,
+                                                    r_place.projection,
+                                                );
+                                            }
+                                        } else {
+                                            record_def(l_place.local, r_place.local, &[]);
+                                        }
+                                    }
+                                }
+                                _ => (),
+                            }
+                        }
+                    }
+                    _ => (),
+                }
+            }
+        }
+
+        for (def_id, method_defs) in &self.var_defs {
+            debug!("var defs for {:?}", def_id);
+            for (local, def) in method_defs {
+                debug!("\t{:?} = {:?}", local, def);
+            }
+        }
+    }
+
+    fn reify(&self, access_path: AccessPath, def_id: DefId) -> Vec<AccessPath> {
+        if let Some(method_defs) = self.var_defs.get(&def_id) {
+            if let Some(defs) = method_defs.get(&access_path.base) {
+                let mut results = vec![];
+                for def in defs {
+                    if !def.fields.is_empty() {
+                        let mut composed_fields = def.fields.clone();
+                        composed_fields.extend(&access_path.fields);
+                        results.extend(self.reify(
+                            AccessPath {
+                                base: def.base,
+                                fields: composed_fields,
+                            },
+                            def_id,
+                        ));
+                    }
+                }
+
+                if !results.is_empty() {
+                    return results;
+                }
+            }
+        }
+        vec![access_path]
+    }
+
+    fn process_assignment(
+        &self,
+        dst: &Place<'tcx>,
+        src: &Place<'tcx>,
+        dst_method_id: DefId,
+        src_method_id: DefId,
+    ) -> FlowFunction<'tcx, <Self as IfdsProblem<'tcx>>::Fact> {
+        let dst = AccessPath::try_from(dst);
+        let src = AccessPath::try_from(src);
+
+        if dst.is_err() || src.is_err() {
+            return Self::identity();
+        }
+        let dst = dst.unwrap();
+        let src = src.unwrap();
+
+        if dst.fields.is_empty() && src.fields.is_empty() {
+            return Box::new(move |fact| {
+                let mut results = HashSet::new();
+                if let ConflictField::Field {
+                    container,
+                    key,
+                    read_only,
+                } = fact
+                {
+                    if let Key::Var(_, access_path) = key {
+                        if dst.base == access_path.base {
+                            results.insert(ConflictField::Field {
+                                container: *container,
+                                key: Key::Var(
+                                    src_method_id,
+                                    AccessPath {
+                                        base: src.base,
+                                        fields: access_path.fields.clone(),
+                                    },
+                                ),
+                                read_only: *read_only,
+                            });
+                        } else {
+                            results.insert(fact.clone());
+                        }
+                    } else {
+                        results.insert(fact.clone());
+                    }
+                }
+                results
+            });
+        }
+
+        if dst.fields.is_empty() && !src.fields.is_empty() {
+            let reified_srcs = self.reify(src, src_method_id);
+            return Box::new(move |fact| {
+                let mut results = HashSet::new();
+                if let ConflictField::Field {
+                    container,
+                    key,
+                    read_only,
+                } = fact
+                {
+                    if let Key::Var(_, access_path) = key {
+                        if dst.base == access_path.base {
+                            for reified_src in &reified_srcs {
+                                let mut composed_fields = reified_src.fields.clone();
+                                composed_fields.extend(access_path.fields.clone());
+                                results.insert(ConflictField::Field {
+                                    container: *container,
+                                    key: Key::Var(
+                                        src_method_id,
+                                        AccessPath {
+                                            base: reified_src.base,
+                                            fields: composed_fields,
+                                        },
+                                    ),
+                                    read_only: *read_only,
+                                });
+                            }
+                        } else {
+                            results.insert(fact.clone());
+                        }
+                    } else {
+                        results.insert(fact.clone());
+                    }
+                }
+                results
+            });
+        }
+
+        if !dst.fields.is_empty() && src.fields.is_empty() {
+            let reified_dsts = self.reify(dst, dst_method_id);
+            return Box::new(move |fact| {
+                let mut results = HashSet::new();
+                if let ConflictField::Field {
+                    container,
+                    key,
+                    read_only,
+                } = fact
+                {
+                    if let Key::Var(_, access_path) = key {
+                        for reified_dst in &reified_dsts {
+                            if reified_dst.base == access_path.base
+                                && reified_dst.fields.len() <= access_path.fields.len()
+                                && reified_dst.fields
+                                    == access_path.fields[..reified_dst.fields.len()]
+                            {
+                                results.insert(ConflictField::Field {
+                                    container: *container,
+                                    key: Key::Var(
+                                        src_method_id,
+                                        AccessPath {
+                                            base: src.base,
+                                            fields: access_path.fields[reified_dst.fields.len()..]
+                                                .to_vec(),
+                                        },
+                                    ),
+                                    read_only: *read_only,
+                                });
+                                results.insert(fact.clone());
+                            } else {
+                                results.insert(fact.clone());
+                            }
+                        }
+                    } else {
+                        results.insert(fact.clone());
+                    }
+                }
+                results
+            });
+        }
+
+        // For case: !dst.fields.is_empty() && !src.fields.is_empty(), in practice we never meet
+        // assignments in this form(like `x.a.b.c = y.p.q.r`), even though it's legal in syntax
+        // of MIR, that's still too crazy if this kind of assignments really exists...
+        panic!(
+            "unable to analyze the code you provided, please report this issue in \
+                 https://github.com/WeBankBlockchain/liquid/issues"
+        )
+    }
+
+    fn resolve_const_val(&self, const_val: &ConstValue<'tcx>) -> Option<Vec<u8>> {
+        match const_val {
+            ConstValue::Scalar(scalar) => {
+                match scalar {
+                    Scalar::Int(int) => {
+                        // The first size bytes of data are the value.
+                        // Do not try to read less or more bytes than that.
+                        // The remaining bytes must be 0.
+                        let size = int.size().bytes() as usize;
+                        let data = if int == &ScalarInt::ZST {
+                            0
+                        } else {
+                            int.to_bits(int.size()).unwrap()
+                        };
+                        let bytes = &data.to_be_bytes()[..size];
+                        return Some(bytes.to_vec());
+                    }
+                    Scalar::Ptr(ptr) => match self.tcx.get_global_alloc(ptr.alloc_id) {
+                        Some(GlobalAlloc::Memory(alloc)) => {
+                            let alloc_len = alloc.len() as u64;
+                            let offset = ptr.offset;
+                            assert!(alloc_len > offset.bytes());
+                            let size = alloc_len - offset.bytes();
+                            if let Ok(bytes) = alloc.get_bytes(
+                                &self.tcx,
+                                AllocRange {
+                                    start: offset,
+                                    size: Size::from_bytes(size),
+                                },
+                            ) {
+                                return Some(bytes.to_vec());
+                            }
+                        }
+                        _ => (),
+                    },
+                }
+            }
+            ConstValue::Slice { data, start, end } => {
+                assert!(end > start);
+                if data.mutability == Mutability::Not {
+                    let bytes = data.get_bytes(
+                        &self.tcx,
+                        AllocRange {
+                            start: Size::from_bytes(*start),
+                            size: Size::from_bytes(end - start),
+                        },
+                    );
+                    if bytes.is_ok() {
+                        return Some(bytes.unwrap().to_vec());
+                    }
+                }
+            }
+            unknown => debug!("resolve unknown type of constant: `{:?}`", unknown),
+        }
+        None
+    }
+
+    fn resolve_const(&self, constant: &Constant<'tcx>) -> Option<Vec<u8>> {
+        let const_kind = &constant.literal;
+        match const_kind {
+            ConstantKind::Val(val, _) => {
+                if let Some(resolved_val) = self.resolve_const_val(val) {
+                    return Some(resolved_val);
+                }
+            }
+            ConstantKind::Ty(constant) => match &constant.val {
+                ConstKind::Unevaluated(unevaluated) => {
+                    let param_env = ParamEnv::reveal_all();
+                    if let Some(resolved_val) = self
+                        .tcx
+                        .const_eval_resolve(param_env, *unevaluated, None)
+                        .and_then(|resolved| Ok(self.resolve_const_val(&resolved)))
+                        .ok()
+                        .flatten()
+                    {
+                        return Some(resolved_val);
+                    }
+                }
+                ConstKind::Value(val) => {
+                    if let Some(resolved_val) = self.resolve_const_val(val) {
+                        return Some(resolved_val);
+                    }
+                }
+                _ => (),
+            },
+        }
+        None
+    }
 }
 
 impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
@@ -81,9 +465,10 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
     }
 
     fn initial_seeds(
-        &self,
+        &mut self,
     ) -> HashMap<<Self::Icfg as InterproceduralCFG>::Node, HashSet<Self::Fact>> {
         let entrance = self.icfg.get_method_by_index(self.entry_point);
+        self.insert_var_defs(entrance);
         let start_points = self.icfg.get_start_points_of(entrance);
         let mut initial_seeds: HashMap<_, _> = Default::default();
         for start_point in start_points {
@@ -93,10 +478,10 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
     }
 
     fn get_call_flow_function(
-        &self,
+        &mut self,
         call_site: &<Self::Icfg as InterproceduralCFG>::Node,
         callee: &<Self::Icfg as InterproceduralCFG>::Method,
-    ) -> FlowFunction<Self::Fact> {
+    ) -> FlowFunction<'tcx, Self::Fact> {
         if call_site.basic_block.is_none() {
             return Self::identity();
         }
@@ -116,58 +501,32 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
             if callee.used_for_clone {
                 // Maybe this callee is a implementation provided by user.
                 let dst = match destination {
-                    Some((place, _)) => place.local,
+                    Some((place, _)) => place,
                     _ => unreachable!(),
                 };
                 let src = match &args[0] {
-                    Operand::Move(place) | Operand::Copy(place) => place.local,
+                    Operand::Move(place) | Operand::Copy(place) => place,
                     _ => unreachable!(),
                 };
-                return Box::new(move |fact| {
-                    let mut results = HashSet::new();
-                    if let ConflictField::Field {
-                        container,
-                        key,
-                        read_only,
-                    } = fact
-                    {
-                        if key == &Key::AccessPath(caller_id, dst) {
-                            results.insert(ConflictField::Field {
-                                container: *container,
-                                key: Key::AccessPath(caller_id, src),
-                                read_only: *read_only,
-                            });
-                        } else {
-                            results.insert(fact.clone());
-                        }
-                    } else {
-                        results.insert(fact.clone());
-                    }
-                    results
-                });
+                return self.process_assignment(dst, src, caller_id, caller_id);
             }
+
+            self.insert_var_defs(callee);
 
             if let Some((ret_place, _)) = destination {
                 let ret_local = ret_place.local;
-                return Box::new(move |fact| {
-                    let mut results = HashSet::new();
-                    let ret_key = Key::AccessPath(caller_id, ret_local);
-                    if let ConflictField::Field {
-                        container,
-                        key,
-                        read_only,
-                    } = fact
-                    {
-                        if key == &ret_key {
-                            results.insert(ConflictField::Field {
-                                container: *container,
-                                key: Key::AccessPath(callee_id, RETURN_PLACE),
-                                read_only: *read_only,
-                            });
-                        }
-                    }
-                    results
-                });
+                return self.process_assignment(
+                    &Place {
+                        local: ret_local,
+                        projection: self.tcx.intern_place_elems(&[]),
+                    },
+                    &Place {
+                        local: RETURN_PLACE,
+                        projection: self.tcx.intern_place_elems(&[]),
+                    },
+                    caller_id,
+                    callee_id,
+                );
             } else {
                 Self::empty()
             }
@@ -177,12 +536,12 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
     }
 
     fn get_return_flow_function(
-        &self,
+        &mut self,
         call_site: &<Self::Icfg as InterproceduralCFG>::Node,
         callee: &<Self::Icfg as InterproceduralCFG>::Method,
         _exit_site: &<Self::Icfg as InterproceduralCFG>::Node,
         _return_site: &<Self::Icfg as InterproceduralCFG>::Node,
-    ) -> FlowFunction<Self::Fact> {
+    ) -> FlowFunction<'tcx, Self::Fact> {
         if call_site.basic_block.is_none() {
             return Self::identity();
         }
@@ -192,14 +551,18 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
         let call_site_bbd = &self.tcx.optimized_mir(caller.def_id).basic_blocks()[basic_block];
         let terminator = call_site_bbd.terminator.as_ref().unwrap();
         let caller_id = caller.def_id;
-        let callee_id = callee.def_id;
 
         if let TerminatorKind::Call { args, .. } = &terminator.kind {
             let actual_args = args
                 .iter()
                 .map(|arg| match arg {
-                    Operand::Copy(place) | Operand::Move(place) => place.local,
-                    _ => todo!(),
+                    Operand::Copy(place) | Operand::Move(place) => {
+                        assert!(place.projection.is_empty());
+                        Some(Either::Left(place.local))
+                    }
+                    Operand::Constant(box constant) => self
+                        .resolve_const(constant)
+                        .and_then(|constant| Some(Either::Right(constant))),
                 })
                 .collect::<Vec<_>>();
             let param_args = self
@@ -217,11 +580,28 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                     read_only,
                 } = fact
                 {
-                    if let Key::AccessPath(callee_id, local) = key {
-                        if let Some(pos) = param_args.iter().position(|arg| arg == local) {
+                    if let Key::Var(_, access_path) = key {
+                        if let Some(pos) =
+                            param_args.iter().position(|arg| arg == &access_path.base)
+                        {
+                            let actual_arg = &actual_args[pos];
+                            let key = if let Some(actual_arg) = actual_arg {
+                                match actual_arg {
+                                    Either::Left(local) => Key::Var(
+                                        caller_id,
+                                        AccessPath {
+                                            base: *local,
+                                            fields: access_path.fields.clone(),
+                                        },
+                                    ),
+                                    Either::Right(constant) => Key::Const(constant.clone()),
+                                }
+                            } else {
+                                Key::Runtime
+                            };
                             results.insert(ConflictField::Field {
                                 container: *container,
-                                key: Key::AccessPath(caller_id, actual_args[pos]),
+                                key,
                                 read_only: *read_only,
                             });
                         }
@@ -239,14 +619,14 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
     fn get_normal_flow_function(
         &mut self,
         curr: &<Self::Icfg as InterproceduralCFG>::Node,
-    ) -> FlowFunction<Self::Fact> {
+    ) -> FlowFunction<'tcx, Self::Fact> {
         if curr.basic_block.is_none() {
-            debug!("virtual node found: {:?}", curr);
             return Self::identity();
         }
 
         let method = self.icfg.get_method_by_index(curr.belongs_to);
         let body = self.tcx.optimized_mir(method.def_id);
+        let local_decls = &body.local_decls;
         let basic_block = curr.basic_block.unwrap();
         let bbd = &body.basic_blocks()[basic_block];
         let method_id = method.def_id;
@@ -275,17 +655,31 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
             assert!(callees.len() == 1);
             let callee = callees[0];
 
+            let dst = match destination {
+                Some((place, _)) => place,
+                _ => unreachable!(),
+            };
             if callee.used_for_clone {
                 // The reason why a method used for cloning coming into this position is that
                 // that method must have no MIR body.
-                let dst = match destination {
-                    Some((place, _)) => place.local,
-                    _ => unreachable!(),
-                };
                 let src = match &args[0] {
-                    Operand::Move(place) | Operand::Copy(place) => place.local,
+                    Operand::Move(place) | Operand::Copy(place) => place,
                     _ => unreachable!(),
                 };
+                return self.process_assignment(dst, src, method_id, method_id);
+            }
+
+            let fn_name = KnownNames::get(self.tcx, callee.def_id);
+
+            if matches!(
+                fn_name,
+                KnownNames::LiquidEnvGetCaller
+                    | KnownNames::LiquidEnvGetOrigin
+                    | KnownNames::LiquidEnvNow
+                    | KnownNames::LiquidEnvGetAddress
+                    | KnownNames::LiquidEnvGetBlockNumber
+            ) {
+                let env_key = Key::Env(fn_name.into());
                 return Box::new(move |fact| {
                     let mut results = HashSet::new();
                     if let ConflictField::Field {
@@ -294,23 +688,23 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                         read_only,
                     } = fact
                     {
-                        if key == &Key::AccessPath(method_id, dst) {
-                            results.insert(ConflictField::Field {
-                                container: *container,
-                                key: Key::AccessPath(method_id, src),
-                                read_only: *read_only,
-                            });
-                        } else {
-                            results.insert(fact.clone());
+                        if let Key::Var(_, access_path) = key {
+                            if access_path.base == dst.local {
+                                let new_fact = ConflictField::Field {
+                                    container: *container,
+                                    key: env_key.clone(),
+                                    read_only: *read_only,
+                                };
+                                results.insert(new_fact);
+                                return results;
+                            }
                         }
-                    } else {
-                        results.insert(fact.clone());
                     }
-                    results
+                    results.insert(fact.clone());
+                    return results;
                 });
             }
 
-            let fn_name = KnownNames::get(self.tcx, callee.def_id);
             if matches!(
                 fn_name,
                 KnownNames::LiquidStorageCollectionsMappingContainsKey
@@ -329,7 +723,6 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                         _ => unreachable!(),
                     },
                 );
-
                 let pts_error = format!(
                     "unable to get points-to set of `{:?}` in `{:?}`, this is always \
                         caused by some internal bugs, please report this issue in \
@@ -337,6 +730,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                     receiver.place().unwrap(),
                     self.icfg.get_method_of(curr)
                 );
+
                 if let Some(points_to) = points_to {
                     let mut states = vec![];
                     for point_to in points_to {
@@ -359,46 +753,32 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                         KnownNames::LiquidStorageCollectionsMappingContainsKey
                             | KnownNames::LiquidStorageCollectionsMappingGet
                             | KnownNames::LiquidStorageCollectionsMappingIndex
-                    ) {
-                        let local = match &args[1] {
-                            Operand::Copy(place) | Operand::Move(place) => place.local,
-                            _ => unreachable!(),
-                        };
-                        return Box::new(move |fact| {
-                            if fact == &ConflictField::Zero {
-                                let mut results = HashSet::new();
-                                for container in states {
-                                    let new_fact = ConflictField::Field {
-                                        container,
-                                        key: Key::AccessPath(method_id, local),
-                                        read_only: true,
-                                    };
-                                    results.insert(new_fact);
-                                }
-                                results
-                            } else {
-                                HashSet::from_iter([fact.clone()])
-                            }
-                        });
-                    }
-
-                    if matches!(
-                        fn_name,
-                        KnownNames::LiquidStorageCollectionsMappingGetMut
+                            | KnownNames::LiquidStorageCollectionsMappingGetMut
                             | KnownNames::LiquidStorageCollectionsMappingIndexMut
                     ) {
-                        let local = match &args[1] {
+                        let this = &args[0];
+                        let read_only = match this.ty(local_decls, self.tcx).kind() {
+                            TyKind::Ref(_, _, mutable) => mutable != &Mutability::Mut,
+                            _ => unreachable!(),
+                        };
+                        let key = match &args[1] {
                             Operand::Copy(place) | Operand::Move(place) => place.local,
                             _ => unreachable!(),
                         };
                         return Box::new(move |fact| {
                             if fact == &ConflictField::Zero {
                                 let mut results = HashSet::new();
-                                for container in states {
+                                for container in &states {
                                     let new_fact = ConflictField::Field {
-                                        container,
-                                        key: Key::AccessPath(method_id, local),
-                                        read_only: false,
+                                        container: *container,
+                                        key: Key::Var(
+                                            method_id,
+                                            AccessPath {
+                                                base: key,
+                                                fields: vec![],
+                                            },
+                                        ),
+                                        read_only,
                                     };
                                     results.insert(new_fact);
                                 }
@@ -410,21 +790,27 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                     }
 
                     if matches!(fn_name, KnownNames::LiquidStorageCollectionsMappingInsert) {
-                        let local = match &args[1] {
+                        let key = match &args[1] {
                             Operand::Copy(place) | Operand::Move(place) => place.local,
                             _ => unreachable!(),
                         };
                         return Box::new(move |fact| {
                             if fact == &ConflictField::Zero {
                                 let mut results = HashSet::new();
-                                for container in states {
+                                for container in &states {
                                     results.insert(ConflictField::Field {
-                                        container,
-                                        key: Key::AccessPath(method_id, local),
+                                        container: *container,
+                                        key: Key::Var(
+                                            method_id,
+                                            AccessPath {
+                                                base: key,
+                                                fields: vec![],
+                                            },
+                                        ),
                                         read_only: false,
                                     });
                                     results.insert(ConflictField::Field {
-                                        container,
+                                        container: *container,
                                         key: Key::Len,
                                         read_only: false,
                                     });
@@ -440,9 +826,9 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                         return Box::new(move |fact| {
                             if fact == &ConflictField::Zero {
                                 let mut results = HashSet::new();
-                                for container in states {
+                                for container in &states {
                                     results.insert(ConflictField::Field {
-                                        container,
+                                        container: *container,
                                         key: Key::Len,
                                         read_only: true,
                                     });
@@ -453,82 +839,113 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                             }
                         });
                     }
-
                     // All branches must be processed.
                     unreachable!()
                 } else {
                     panic!("{}", pts_error)
                 }
             } else {
-                Self::identity()
+                return Self::identity();
             }
         } else {
-            let BasicBlockData { ref statements, .. } = bbd;
-
-            let assignments = statements
-                .iter()
-                .filter_map(|stmt| {
-                    let kind = &stmt.kind;
-                    if let StatementKind::Assign(box (l_place, r_value)) = kind {
-                        let r_key = match r_value {
-                            Rvalue::Use(r_operand) => match r_operand {
-                                Operand::Move(r_place) | Operand::Copy(r_place) => {
-                                    Key::AccessPath(method_id, r_place.local)
+            let statements = &bbd.statements;
+            let assignments: Vec<Either<FlowFunction<'tcx, Self::Fact>, (Place<'tcx>, Vec<u8>)>> =
+                statements
+                    .iter()
+                    .filter_map(|stmt| {
+                        let kind = &stmt.kind;
+                        if let StatementKind::Assign(box (l_place, r_value)) = kind {
+                            match r_value {
+                                Rvalue::Use(r_operand) => match r_operand {
+                                    Operand::Move(r_place) | Operand::Copy(r_place) => {
+                                        let flow_fn = self.process_assignment(
+                                            l_place, r_place, method_id, method_id,
+                                        );
+                                        return Some(Either::Left(flow_fn));
+                                    }
+                                    Operand::Constant(box constant) => {
+                                        if let Some(constant) = self.resolve_const(constant) {
+                                            return Some(Either::Right((
+                                                l_place.clone(),
+                                                constant,
+                                            )));
+                                        } else {
+                                            return None;
+                                        }
+                                    }
+                                },
+                                Rvalue::Ref(_, kind, r_place) => {
+                                    if kind == &BorrowKind::Shared {
+                                        let flow_fn = self.process_assignment(
+                                            l_place, r_place, method_id, method_id,
+                                        );
+                                        return Some(Either::Left(flow_fn));
+                                    }
                                 }
-                                // TODO: uses constant value as conflict key.
-                                Operand::Constant(..) => Key::Runtime,
-                            },
-                            Rvalue::Ref(_, kind, r_place) => {
-                                if kind == &BorrowKind::Shared {
-                                    Key::AccessPath(method_id, r_place.local)
-                                } else {
-                                    Key::Runtime
-                                }
-                            }
-                            _ => Key::Runtime,
-                        };
-                        Some((l_place.local, r_key))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
+                                _ => (),
+                            };
+                            None
+                        } else {
+                            None
+                        }
+                    })
+                    .rev()
+                    .collect::<Vec<_>>();
 
             Box::new(move |fact| {
-                if let ConflictField::Field {
-                    container,
-                    read_only,
-                    ..
-                } = fact
-                {
-                    let mut results = HashSet::from_iter([fact.clone()]);
-                    for (l_local, r_key) in assignments.iter().rev() {
-                        let l_field = ConflictField::Field {
-                            container: *container,
-                            key: Key::AccessPath(method_id, *l_local),
-                            read_only: *read_only,
-                        };
-                        if results.remove(&l_field) {
-                            results.insert(ConflictField::Field {
-                                container: *container,
-                                key: r_key.clone(),
-                                read_only: *read_only,
-                            });
+                let mut results = HashSet::from_iter([fact.clone()]);
+                for item in &assignments {
+                    match item {
+                        Either::Left(flow_fn) => {
+                            let facts = results.drain().collect::<Vec<_>>();
+                            for fact in facts {
+                                let facts = flow_fn(&fact);
+                                if !facts.is_empty() {
+                                    results.extend(facts);
+                                } else {
+                                    results.insert(fact);
+                                }
+                            }
+                        }
+                        Either::Right((l_place, constant)) => {
+                            let facts = results.drain().collect::<Vec<_>>();
+                            for fact in facts {
+                                if let ConflictField::Field {
+                                    container,
+                                    key: Key::Var(_, access_path),
+                                    read_only,
+                                } = &fact
+                                {
+                                    if let Ok(l_ap) = AccessPath::try_from(l_place) {
+                                        if access_path == &l_ap {
+                                            results.insert(ConflictField::Field {
+                                                container: *container,
+                                                key: Key::Const(constant.clone()),
+                                                read_only: *read_only,
+                                            });
+                                        } else {
+                                            results.insert(fact);
+                                        }
+                                    } else {
+                                        results.insert(fact);
+                                    }
+                                } else {
+                                    results.insert(fact);
+                                }
+                            }
                         }
                     }
-                    results
-                } else {
-                    HashSet::new()
                 }
+                results
             })
         }
     }
 
     fn get_call_to_return_flow_function(
-        &self,
+        &mut self,
         call_site: &<Self::Icfg as InterproceduralCFG>::Node,
         _return_site: &<Self::Icfg as InterproceduralCFG>::Node,
-    ) -> FlowFunction<Self::Fact> {
+    ) -> FlowFunction<'tcx, Self::Fact> {
         if call_site.basic_block.is_none() {
             return Self::identity();
         }
@@ -538,22 +955,24 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
         let basic_block = call_site.basic_block.unwrap();
         let bbd = &body.basic_blocks()[basic_block];
         let terminator = bbd.terminator.as_ref().unwrap();
-        let method_id = method.def_id;
 
         if let TerminatorKind::Call { destination, .. } = &terminator.kind {
             if let Some((ret_place, _)) = destination {
                 let ret_local = ret_place.local;
                 return Box::new(move |fact| {
-                    let ret_key = Key::AccessPath(method_id, ret_local);
-                    if let ConflictField::Field { key, .. } = fact {
-                        if key == &ret_key {
-                            HashSet::new()
-                        } else {
-                            HashSet::from_iter([fact.clone()])
+                    let mut results = HashSet::new();
+                    if let ConflictField::Field {
+                        key: Key::Var(_, access_path),
+                        ..
+                    } = fact
+                    {
+                        if access_path.base != ret_local {
+                            results.insert(fact.clone());
                         }
                     } else {
-                        HashSet::from_iter([fact.clone()])
+                        results.insert(fact.clone());
                     }
+                    results
                 });
             } else {
                 Self::identity()

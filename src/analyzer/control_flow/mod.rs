@@ -4,7 +4,7 @@ mod pfg;
 mod utils;
 
 pub(crate) use builder::Builder;
-pub(crate) use cfg::{BackwardCFG, ForwardCFG, Method, MethodIndex, Node};
+pub(crate) use cfg::{BackwardCFG, ForwardCFG, Method, MethodIndex};
 pub(crate) use pfg::AndersonPFG;
 use std::fmt::Debug;
 use std::hash::Hash;
