@@ -44,6 +44,13 @@ pub struct Constraint<'tcx> {
     src: Either<Location<'tcx>, StateVariable>,
 }
 
+#[derive(PartialEq, Eq, Hash)]
+struct CallSite {
+    caller: MethodIndex,
+    node: NodeIndex,
+    callee: MethodIndex,
+}
+
 pub struct AndersonPFG<'cfg, 'tcx> {
     tcx: TyCtxt<'tcx>,
     cfg: &'cfg ForwardCFG<'tcx>,
@@ -54,6 +61,7 @@ pub struct AndersonPFG<'cfg, 'tcx> {
     loc_to_index: HashMap<Location<'tcx>, NodeIndex>,
     tmp_var_id: usize,
     indirect_call_args: HashMap<DefId, HashMap<Local, Vec<Method<'tcx>>>>,
+    visited: HashSet<CallSite>,
 }
 
 impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
@@ -78,6 +86,7 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
             loc_to_index: Default::default(),
             tmp_var_id: 0,
             indirect_call_args: Default::default(),
+            visited: Default::default(),
         }
     }
 
@@ -121,6 +130,7 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
     }
 
     fn collect_constraints(&mut self, method: &Method<'tcx>) {
+        debug!("collect_constraints for method: `{:?}`", method);
         let nodes = self.cfg.get_nodes_of(method);
         let def_id = method.def_id;
         let body = self.tcx.optimized_mir(def_id);
@@ -190,7 +200,16 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
                     } else {
                         unreachable!("terminator kind of calling node should be `Call`");
                     }
-                    self.collect_constraints(callee);
+
+                    let call_site = CallSite {
+                        caller: self.cfg.get_method_index(method),
+                        node: self.cfg.node_to_index[node],
+                        callee: self.cfg.get_method_index(callee),
+                    };
+                    if !self.visited.contains(&call_site) {
+                        self.visited.insert(call_site);
+                        self.collect_constraints(callee);
+                    }
                 }
             } else {
                 for statement in statements {
