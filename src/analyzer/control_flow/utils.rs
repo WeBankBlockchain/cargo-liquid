@@ -49,19 +49,12 @@ pub enum SpecialCause {
 
 pub fn is_special_method<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Option<SpecialCause> {
     let known_name = KnownNames::get(tcx, def_id);
-    if matches!(
+    if !matches!(
         known_name,
-        KnownNames::LiquidIntrinsicsRequire
-            | KnownNames::LiquidStorageCollectionsMappingInitialize
-            | KnownNames::LiquidStorageCollectionsMappingLen
-            | KnownNames::LiquidStorageCollectionsMappingInsert
-            | KnownNames::LiquidStorageCollectionsMappingContainsKey
-            | KnownNames::LiquidStorageCollectionsMappingIndex
-            | KnownNames::LiquidStorageCollectionsMappingIndexMut
-            | KnownNames::LiquidStorageCollectionsMappingGet
-            | KnownNames::LiquidStorageCollectionsMappingGetMut
-            | KnownNames::LiquidEnvGetCaller
-            | KnownNames::RustAlloc
+        KnownNames::CoreOpsFunctionFnCall
+            | KnownNames::CoreOpsFunctionFnCallMut
+            | KnownNames::CoreOpsFunctionFnOnceCallOnce
+            | KnownNames::None,
     ) {
         return Some(SpecialCause::Predefined);
     }
@@ -115,7 +108,7 @@ fn specialize_generic_arg<'tcx>(
     }
 }
 
-fn specialize_type_generic_arg<'tcx>(
+pub fn specialize_type_generic_arg<'tcx>(
     tcx: TyCtxt<'tcx>,
     ty: Ty<'tcx>,
     generic_args_map: &HashMap<rustc_span::Symbol, GenericArg<'tcx>>,
@@ -250,7 +243,32 @@ fn specialize_type_generic_arg<'tcx>(
             ));
             tcx.mk_dynamic(specialized_predicates, region)
         }
-        TyKind::Uint(..) | TyKind::Int(..) | TyKind::Str | TyKind::Char => ty,
+        TyKind::Opaque(def_id, substs) => {
+            tcx.mk_opaque(*def_id, specialize_substs(tcx, substs, generic_args_map))
+        }
+        TyKind::Uint(..)
+        | TyKind::Int(..)
+        | TyKind::Str
+        | TyKind::Char
+        | TyKind::Bool
+        | TyKind::Float(..)
+        | TyKind::Never => ty,
+        TyKind::Generator(def_id, substs, movability) => tcx.mk_generator(
+            *def_id,
+            specialize_substs(tcx, substs, generic_args_map),
+            *movability,
+        ),
+        TyKind::GeneratorWitness(bound_types) => {
+            let map_types = |types: &rustc_middle::ty::List<Ty<'tcx>>| {
+                tcx.mk_type_list(
+                    types
+                        .iter()
+                        .map(|ty| specialize_type_generic_arg(tcx, ty, generic_args_map)),
+                )
+            };
+            let specialized_types = bound_types.map_bound(map_types);
+            tcx.mk_generator_witness(specialized_types)
+        }
         unknown => {
             debug!("unknown ty kind {:?}", unknown);
             ty

@@ -42,32 +42,27 @@ struct VirtualCallee<'tcx> {
     substs: SubstsRef<'tcx>,
 }
 
+#[derive(Debug)]
 struct VirtualCallContext<'tcx> {
-    call_sites: Vec<CallSite>,
-    processed_substs: HashSet<SubstsRef<'tcx>>,
+    call_sites: HashSet<CallSite>,
+    processed_adt_substs: HashSet<(DefId, SubstsRef<'tcx>)>,
 }
 
 impl<'tcx> VirtualCallContext<'tcx> {
-    pub fn new() -> Self {
-        Self {
-            call_sites: Default::default(),
-            processed_substs: Default::default(),
-        }
-    }
     pub fn add_call_site(&mut self, call_site: CallSite) {
-        self.call_sites.push(call_site);
+        self.call_sites.insert(call_site);
     }
 
     pub fn get_call_sites(&self) -> impl Iterator<Item = &CallSite> {
         self.call_sites.iter()
     }
 
-    pub fn add_processed_substs(&mut self, substs: SubstsRef<'tcx>) {
-        self.processed_substs.insert(substs);
+    pub fn add_processed_adt_substs(&mut self, adt_id: DefId, substs: SubstsRef<'tcx>) {
+        self.processed_adt_substs.insert((adt_id, substs));
     }
 
-    pub fn is_processed_substs(&self, substs: SubstsRef<'tcx>) -> bool {
-        self.processed_substs.contains(substs)
+    pub fn is_processed_adt_substs(&self, adt_id: DefId, substs: SubstsRef<'tcx>) -> bool {
+        self.processed_adt_substs.contains(&(adt_id, substs))
     }
 }
 
@@ -79,8 +74,10 @@ impl<'tcx> VirtualCallee<'tcx> {
         context: &mut VirtualCallContext<'tcx>,
     ) -> Vec<Method<'tcx>> {
         let mut candidates = vec![];
+        // Returns an iterator containing all impls.
         for impl_id in tcx.all_impls(self.trait_id) {
-            match tcx.type_of(impl_id).kind() {
+            let impl_kind = tcx.type_of(impl_id).kind();
+            match impl_kind {
                 TyKind::Adt(adt_def, adt_substs) => {
                     let adt_id = adt_def.did;
                     let substs_set = substs_infos.get(&adt_id);
@@ -90,7 +87,7 @@ impl<'tcx> VirtualCallee<'tcx> {
 
                     let substs_set = substs_set.unwrap();
                     for substs in substs_set {
-                        if context.is_processed_substs(substs) {
+                        if context.is_processed_adt_substs(adt_id, substs) {
                             continue;
                         }
 
@@ -117,7 +114,7 @@ impl<'tcx> VirtualCallee<'tcx> {
                         }
 
                         if concrete_generic_arg_mismatched {
-                            context.add_processed_substs(substs);
+                            context.add_processed_adt_substs(adt_id, substs);
                             continue;
                         }
 
@@ -214,12 +211,12 @@ impl<'tcx> VirtualCallee<'tcx> {
                                 } else {
                                     todo!("default impl");
                                 }
-                                context.add_processed_substs(substs);
+                                context.add_processed_adt_substs(adt_id, substs);
                             }
                         });
                     }
                 }
-                _ => (),
+                _ => todo!("unknown impl kind: {:?}", impl_kind),
             }
         }
         candidates
@@ -333,6 +330,7 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
                 let mut no_new_callee_found = true;
                 let mut new_tasks = vec![];
                 for (callee, context) in self.virtual_callees.iter_mut() {
+                    debug!("iter virtual_callees {:?} {:?}", callee, context);
                     let possible_callees =
                         callee.probe_possible_callees(self.tcx, &self.substs_cache, context);
 
@@ -519,7 +517,12 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
                                 bb_id: bb.index(),
                             };
                             let callees = self.call_site_cache.get(&call_site);
-                            debug_assert!(callees.is_some());
+                            debug_assert!(
+                                callees.is_some(),
+                                "{:?} {:?}",
+                                self.cfg.get_method_by_index(call_site.caller).def_id,
+                                call_site.bb_id,
+                            );
                             let callees = callees.unwrap();
                             debug_assert!(!callees.is_empty());
                             let is_certain = callees.len() == 1;
@@ -685,11 +688,9 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
             let edge_weight = edge.weight;
             debug!(
                 "{:?}({:?}) -> {:?}({:?}): {:?}",
-                self.tcx
-                    .item_name(self.cfg.get_method_by_index(src_weight.belongs_to).def_id),
+                self.cfg.get_method_by_index(src_weight.belongs_to).def_id,
                 src_weight.basic_block,
-                self.tcx
-                    .item_name(self.cfg.get_method_by_index(tgt_weight.belongs_to).def_id),
+                self.cfg.get_method_by_index(tgt_weight.belongs_to).def_id,
                 tgt_weight.basic_block,
                 edge_weight.kind
             );
@@ -767,11 +768,13 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
                 self.insert_task(callee, Some(call_site));
             }
             Right(virtual_callee) => {
-                self.virtual_callees.entry(virtual_callee).or_insert({
-                    let mut context = VirtualCallContext::new();
-                    context.add_call_site(call_site);
-                    context
-                });
+                self.virtual_callees
+                    .entry(virtual_callee)
+                    .or_insert(VirtualCallContext {
+                        call_sites: HashSet::from_iter([call_site]),
+                        processed_adt_substs: Default::default(),
+                    })
+                    .add_call_site(call_site);
             }
         }
     }
@@ -812,16 +815,14 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
                                 mutbl: *mutbl,
                             },
                         ));
+                    } else if utils::is_concrete(ty.kind()) {
+                        callee.self_ty = Some(impl_ty);
                     } else {
-                        if utils::is_concrete(ty.kind()) {
-                            callee.self_ty = Some(impl_ty);
-                        } else {
-                            todo!(
-                                "encounter unknown self type `{:?}` for `{:?}`",
-                                impl_kind,
-                                callee.def_id,
-                            );
-                        }
+                        todo!(
+                            "encounter unknown self type `{:?}` for `{:?}`",
+                            impl_kind,
+                            callee.def_id,
+                        );
                     }
                 }
                 ty if utils::is_concrete(ty) => {

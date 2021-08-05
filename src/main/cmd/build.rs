@@ -44,7 +44,7 @@ impl CrateMetadata {
     }
 }
 
-const BUILD_TARGET_ARCH: &'static str = "wasm32-unknown-unknown";
+const BUILD_TARGET_ARCH: &str = "wasm32-unknown-unknown";
 
 /// Parses the manifest and returns relevant metadata.
 fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata> {
@@ -91,18 +91,20 @@ fn run_xargo_build(
     crate_metadata: &CrateMetadata,
     use_gm: bool,
     verbosity_behavior: VerbosityBehavior,
+    skip_analysis: bool,
 ) -> Result<String> {
     utils::check_channel()?;
 
     let xbuild = |manifest_path: &ManifestPath| {
         let manifest_dir = manifest_path.as_ref().parent().unwrap();
-        env::set_var("LIQUID_ANALYSIS_TARGET_DIR", manifest_dir);
+        if !skip_analysis {
+            env::set_var("LIQUID_ANALYSIS_TARGET_DIR", manifest_dir);
+        }
 
         let manifest_path = Some(manifest_path);
         let target = Some(BUILD_TARGET_ARCH);
         let target_dir = crate_metadata.target_dir();
         let target_dir_arg = format!("--target-dir={}", target_dir.to_string_lossy());
-
         let mut other_args = ["--no-default-features", "--release", &target_dir_arg].to_vec();
         if use_gm {
             other_args.push("--features=gm");
@@ -128,20 +130,26 @@ fn run_xargo_build(
             anyhow::bail!("xbuild failed with status {}", exit_status);
         }
 
-        // `cfa` means Conflict Fields Analysis.
-        let cfa_result = fs::read_to_string(manifest_dir.join("conflict_fields.analysis")).unwrap();
-        Ok(cfa_result)
+        if !skip_analysis {
+            fs::read_to_string(manifest_dir.join("conflict_fields.analysis")).map_err(|e| {
+                anyhow::anyhow!(
+                    "unable to read results file of conflict fields analysis due to: {}",
+                    e
+                )
+            })
+        } else {
+            Ok(String::new())
+        }
     };
 
-    let cfa_result = Workspace::new(&crate_metadata.cargo_meta, &crate_metadata.root_package.id)?
+    Workspace::new(&crate_metadata.cargo_meta, &crate_metadata.root_package.id)?
         .with_root_package_manifest(|manifest| {
             manifest
                 .with_removed_crate_type("rlib")?
                 .with_profile_release_lto(true)?;
             Ok(())
         })?
-        .using_temp(xbuild)?;
-    Ok(cfa_result)
+        .using_temp(xbuild)
 }
 
 fn build_cargo_project(
@@ -149,9 +157,11 @@ fn build_cargo_project(
     use_gm: bool,
     verbosity_behavior: VerbosityBehavior,
     analysis_behavior: AnalysisBehavior,
-    cg_path: &Option<PathBuf>,
-) -> Result<Option<String>> {
-    const RUSTFLAGS_ENV_VAR: &'static str = "RUSTFLAGS";
+    cfg_path: &Option<PathBuf>,
+) -> Result<String> {
+    const RUSTFLAGS_ENV_VAR: &str = "RUSTFLAGS";
+    const RUSTC_WRAPPER_ENV_VAR: &str = "RUSTC_WRAPPER";
+
     let old_flags = env::var(RUSTFLAGS_ENV_VAR);
     if let Ok(ref old_flags) = old_flags {
         env::set_var(
@@ -166,19 +176,19 @@ fn build_cargo_project(
         drop(fs::remove_file(&crate_metadata.original_wasm));
     }
 
-    let cfa_result = if analysis_behavior != AnalysisBehavior::Skip {
-        /// Sets `RUSTC_WRAPPER` environment variable for current process, which leads
-        /// cargo to invoke liquid-analy as compiler, and liquid-analy can then obtain
-        /// full list of command line arguments of the invocation above.
-        ///
-        /// ## Why not use `RUSTC`?
-        /// Due to that we use unstable version of rustc, and features supported by
-        /// the compiler is inconstant, using compilers of different version to test
-        /// this project is significant. Via setting different `RUSTC` value we can
-        /// achieve this aim easily. But if we use `RUSTC` directly here, then it
-        /// becomes difficult to decide which version of rustc to use in liquid-analy.
-        const RUSTC_WRAPPER_ENV_VAR: &'static str = "RUSTC_WRAPPER";
-        let old_wrapper = env::var(RUSTC_WRAPPER_ENV_VAR);
+    let mut old_wrapper = Err(env::VarError::NotPresent);
+    let skip_analysis = if analysis_behavior != AnalysisBehavior::Skip {
+        // Sets `RUSTC_WRAPPER` environment variable for current process, which leads
+        // cargo to invoke liquid-analy as compiler, and liquid-analy can then obtain
+        // full list of command line arguments of the invocation above.
+        //
+        // ## Why not use `RUSTC`?
+        // Due to that we use unstable version of rustc, and features supported by
+        // the compiler is inconstant, using compilers of different version to test
+        // this project is significant. Via setting different `RUSTC` value we can
+        // achieve this aim easily. But if we use `RUSTC` directly here, then it
+        // becomes difficult to decide which version of rustc to use in liquid-analy.
+        old_wrapper = env::var(RUSTC_WRAPPER_ENV_VAR);
         env::set_var(RUSTC_WRAPPER_ENV_VAR, "liquid-analy");
 
         // The `LIQUID_ANALYSIS_PROJECT` environment variable is used to tell
@@ -188,18 +198,28 @@ fn build_cargo_project(
             crate_metadata.package_name.clone(),
         );
 
-        if let Some(cg_path) = cg_path {
-            let abs_path = if cg_path.is_absolute() {
-                cg_path.to_path_buf()
+        if let Some(cfg_path) = cfg_path {
+            let abs_path = if cfg_path.is_absolute() {
+                cfg_path.to_path_buf()
             } else {
                 let cur_dir = env::current_dir()?;
-                cur_dir.join(cg_path)
+                cur_dir.join(cfg_path)
             };
             env::set_var("LIQUID_ANALYSIS_CFG_PATH", abs_path);
         }
+        false
+    } else {
+        true
+    };
 
-        let cfa_result = run_xargo_build(crate_metadata, use_gm, verbosity_behavior)?;
+    let build_result = run_xargo_build(
+        crate_metadata,
+        use_gm,
+        verbosity_behavior,
+        skip_analysis,
+    );
 
+    if analysis_behavior != AnalysisBehavior::Skip {
         env::set_var(
             RUSTFLAGS_ENV_VAR,
             if let Ok(old_flags) = old_flags {
@@ -216,12 +236,9 @@ fn build_cargo_project(
                 "".into()
             },
         );
+    }
 
-        Some(cfa_result)
-    } else {
-        None
-    };
-    Ok(cfa_result)
+    build_result
 }
 
 /// Strips all custom sections.
@@ -297,7 +314,7 @@ fn optimize_wasm(crate_metadata: &CrateMetadata) -> Result<()> {
         anyhow::bail!("wasm-opt optimization failed");
     }
 
-    // overwrite existing destination wasm file with the optimised version
+    // overwrite existing destination wasm file with the optimized version
     fs::rename(&optimized, &crate_metadata.dest_wasm)?;
     Ok(())
 }
@@ -368,7 +385,7 @@ pub(crate) fn execute_build(
     use_gm: bool,
     verbosity_behavior: VerbosityBehavior,
     analysis_behavior: AnalysisBehavior,
-    cg_path: &Option<PathBuf>,
+    cfg_path: &Option<PathBuf>,
 ) -> Result<String> {
     let started = Instant::now();
 
@@ -376,12 +393,12 @@ pub(crate) fn execute_build(
     let crate_metadata = collect_crate_metadata(&manifest_path)?;
 
     println!("[2/4] {} Building cargo project", TRUCK);
-    let cfa_result = build_cargo_project(
+    let build_result = build_cargo_project(
         &crate_metadata,
         use_gm,
         verbosity_behavior,
         analysis_behavior,
-        cg_path,
+        cfg_path,
     )?;
 
     println!("[3/4] {} Optimizing Wasm bytecode", CLIP);
@@ -390,32 +407,29 @@ pub(crate) fn execute_build(
     println!("[4/4] {} Generating ABI file", PAPER);
     generate_abi(&crate_metadata, verbosity_behavior)?;
 
-    if let Some(cfa_result) = cfa_result {
-        let cfa_result: Value = serde_json::from_str(&cfa_result).unwrap();
-        let cfa_result = cfa_result.as_object().unwrap();
+    let cfa_result: Value = serde_json::from_str(&build_result).unwrap();
+    let cfa_result = cfa_result.as_object().unwrap();
 
-        let abi_content = fs::read_to_string(&crate_metadata.dest_abi).unwrap();
-        let mut origin_abi: Value = serde_json::from_str(&abi_content).unwrap();
-        origin_abi
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .for_each(|method| {
-                let method = method.as_object_mut().unwrap();
-                if method.contains_key("name") && method.contains_key("type") {
-                    if method["type"] == Value::String("function".into()) {
-                        let method_name = String::from(method["name"].as_str().unwrap());
-                        if cfa_result.contains_key(&method_name) {
-                            method
-                                .insert("conflictFields".into(), cfa_result[&method_name].clone());
-                        }
-                    }
+    let abi_content = fs::read_to_string(&crate_metadata.dest_abi).unwrap();
+    let mut origin_abi: Value = serde_json::from_str(&abi_content).unwrap();
+    origin_abi
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .for_each(|method| {
+            let method = method.as_object_mut().unwrap();
+            if method.contains_key("name")
+                && method.contains_key("type")
+                && method["type"] == Value::String("function".into())
+            {
+                let method_name = String::from(method["name"].as_str().unwrap());
+                if cfa_result.contains_key(&method_name) {
+                    method.insert("conflictFields".into(), cfa_result[&method_name].clone());
                 }
-            });
-
-        let new_abi = serde_json::to_string(&origin_abi).unwrap();
-        fs::write(&crate_metadata.dest_abi, new_abi).unwrap();
-    }
+            }
+        });
+    let new_abi = serde_json::to_string(&origin_abi).unwrap();
+    fs::write(&crate_metadata.dest_abi, new_abi).unwrap();
 
     Ok(format!(
         "\n{}Done in {}, your project is ready now:\n{: >6}: {}\n{: >6}: {}",

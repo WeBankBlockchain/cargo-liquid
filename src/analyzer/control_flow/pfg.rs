@@ -1,4 +1,7 @@
-use crate::control_flow::{utils, ForwardCFG, InterproceduralCFG, Method, MethodIndex};
+use crate::{
+    control_flow::{utils, ForwardCFG, InterproceduralCFG, Method, MethodIndex},
+    known_names::KnownNames,
+};
 use either::*;
 use log::*;
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -50,14 +53,15 @@ pub struct AndersonPFG<'cfg, 'tcx> {
     constraints: Vec<Constraint<'tcx>>,
     loc_to_index: HashMap<Location<'tcx>, NodeIndex>,
     tmp_var_id: usize,
+    indirect_call_args: HashMap<DefId, HashMap<Local, Vec<Method<'tcx>>>>,
 }
 
 impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>, cfg: &'cfg ForwardCFG<'tcx>, storage_ty: Ty<'tcx>) -> Self {
         let mut sv_tys = HashSet::new();
-        if let TyKind::Adt(adt_def, ..) = storage_ty.kind() {
+        if let TyKind::Adt(adt_def, substs) = storage_ty.kind() {
             adt_def.all_fields().for_each(|field_def| {
-                let field_ty = field_def.ty(tcx, tcx.intern_substs(&[]));
+                let field_ty = field_def.ty(tcx, substs);
                 sv_tys.insert(field_ty);
             });
         } else {
@@ -73,6 +77,7 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
             constraints: Default::default(),
             loc_to_index: Default::default(),
             tmp_var_id: 0,
+            indirect_call_args: Default::default(),
         }
     }
 
@@ -120,7 +125,38 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
         let def_id = method.def_id;
         let body = self.tcx.optimized_mir(def_id);
         let basic_blocks = body.basic_blocks();
+        let local_decls = &body.local_decls;
         self.tmp_var_id = body.local_decls.len();
+
+        let indirect_call_args = self.indirect_call_args.entry(def_id).or_default();
+        for call_site in self.cfg.get_call_sites_within(method) {
+            let bdd = &basic_blocks[call_site.basic_block.unwrap()];
+            let terminator = bdd.terminator();
+            if let TerminatorKind::Call { func, args, .. } = &terminator.kind {
+                let func_ty = func.ty(local_decls, self.tcx);
+                if let TyKind::FnDef(def_id, ..) = func_ty.kind() {
+                    if matches!(
+                        KnownNames::get(self.tcx, *def_id),
+                        KnownNames::CoreOpsFunctionFnCall
+                            | KnownNames::CoreOpsFunctionFnCallMut
+                            | KnownNames::CoreOpsFunctionFnOnceCallOnce
+                    ) {
+                        let arg_local = match args[1] {
+                            Operand::Copy(place) | Operand::Move(place) => place.local,
+                            _ => unreachable!(),
+                        };
+                        let callees = self.cfg.get_callees_of_call_at(call_site);
+                        indirect_call_args.insert(
+                            arg_local,
+                            callees
+                                .iter()
+                                .map(|method| (*method).clone())
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                }
+            }
+        }
 
         for node in nodes {
             if node.basic_block.is_none() {
@@ -139,13 +175,14 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
                     if utils::is_special_method(self.tcx, callee.def_id).is_some() {
                         continue;
                     }
+
                     let terminator = terminator.as_ref().unwrap();
                     if let TerminatorKind::Call {
                         args, destination, ..
                     } = &terminator.kind
                     {
                         self.collect_constraints_for_call(
-                            callee.def_id,
+                            callee,
                             def_id,
                             &args,
                             destination.and_then(|dest| Some(dest.0)),
@@ -157,7 +194,7 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
                 }
             } else {
                 for statement in statements {
-                    self.collect_constraints_for_stmt(statement, def_id);
+                    self.collect_constraints_for_stmt(method, statement);
                 }
             }
         }
@@ -174,48 +211,65 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
 
     fn collect_constraints_for_call(
         &mut self,
-        callee_id: DefId,
+        callee: &Method<'tcx>,
         caller_id: DefId,
         args: &[Operand<'tcx>],
         dest: Option<Place<'tcx>>,
     ) {
-        let callee_body = self.tcx.optimized_mir(callee_id);
-        let callee_args = callee_body.args_iter();
-        let callee_local_decls = &callee_body.local_decls;
-        args.iter()
-            .zip(callee_args)
-            .for_each(|(actual_arg, param_arg)| {
-                let param_ty = callee_local_decls[param_arg].ty;
-                if !self.is_related_to_sv(param_ty) {
-                    return;
-                }
-
-                let l_place = Place {
-                    local: param_arg,
-                    projection: self.tcx.intern_place_elems(&[]),
-                };
-                let l_loc = Location {
-                    def_id: callee_id,
-                    place: l_place,
-                };
-
-                match actual_arg {
-                    Operand::Copy(r_place) | Operand::Move(r_place) => {
-                        let r_loc = Location {
-                            def_id: caller_id,
-                            place: *r_place,
-                        };
-                        self.constraints.push(Constraint {
-                            kind: ConstraintKind::Copy,
-                            tgt: l_loc,
-                            src: Either::Left(r_loc),
-                        });
+        let mut skip_arg_prop = false;
+        if args.len() == 2 {
+            match &args[1] {
+                Operand::Move(place) | Operand::Copy(place) => {
+                    let arg_local = place.local;
+                    if self.indirect_call_args[&caller_id].contains_key(&arg_local) {
+                        skip_arg_prop = true;
                     }
-                    _ => (),
                 }
-            });
+                _ => (),
+            }
+        }
+
+        let callee_id = callee.def_id;
+        let callee_body = self.tcx.optimized_mir(callee_id);
+        if !skip_arg_prop {
+            let callee_args = callee_body.args_iter();
+            let callee_local_decls = &callee_body.local_decls;
+            args.iter()
+                .zip(callee_args)
+                .for_each(|(actual_arg, param_arg)| {
+                    let param_ty = callee_local_decls[param_arg].ty;
+                    let param_ty = self.concrete_ty(param_ty, callee);
+                    if !self.is_related_to_sv(param_ty) {
+                        return;
+                    }
+
+                    let l_place = Place {
+                        local: param_arg,
+                        projection: self.tcx.intern_place_elems(&[]),
+                    };
+                    let l_loc = Location {
+                        def_id: callee_id,
+                        place: l_place,
+                    };
+                    match actual_arg {
+                        Operand::Copy(r_place) | Operand::Move(r_place) => {
+                            let r_loc = Location {
+                                def_id: caller_id,
+                                place: *r_place,
+                            };
+                            self.constraints.push(Constraint {
+                                kind: ConstraintKind::Copy,
+                                tgt: l_loc,
+                                src: Either::Left(r_loc),
+                            });
+                        }
+                        _ => (),
+                    }
+                });
+        }
 
         let return_ty = callee_body.return_ty();
+        let return_ty = self.concrete_ty(return_ty, callee);
         if self.is_related_to_sv(return_ty) {
             if let Some(l_place) = dest {
                 let l_loc = Location {
@@ -380,12 +434,14 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
         }
     }
 
-    fn collect_constraints_for_stmt(&mut self, stmt: &Statement<'tcx>, def_id: DefId) {
+    fn collect_constraints_for_stmt(&mut self, method: &Method<'tcx>, stmt: &Statement<'tcx>) {
+        let def_id = method.def_id;
         let local_decls = &self.tcx.optimized_mir(def_id).local_decls;
         let kind = &stmt.kind;
         match kind {
             StatementKind::Assign(box (l_place, r_value)) => {
                 let ty = r_value.ty(local_decls, self.tcx);
+                let ty = self.concrete_ty(ty, method);
                 if !self.is_related_to_sv(ty) {
                     return;
                 }
@@ -425,7 +481,38 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
                 match r_value {
                     Rvalue::Use(r_operand) => match r_operand {
                         Operand::Copy(r_place) | Operand::Move(r_place) => {
-                            self.recognize_assign(l_place, r_place, def_id);
+                            if let Some(callees) =
+                                self.indirect_call_args[&def_id].get(&l_place.local)
+                            {
+                                debug_assert!(l_place.projection.len() == 1);
+                                for callee in callees {
+                                    if let PlaceElem::Field(field, _) = l_place.projection[0] {
+                                        let field = field.as_usize();
+                                        let l_loc = Location {
+                                            def_id: callee.def_id,
+                                            place: Place {
+                                                // `_0` is return value, while `_1` is reference of
+                                                // closure object.
+                                                local: Local::from_usize(field + 2),
+                                                projection: self.tcx.intern_place_elems(&[]),
+                                            },
+                                        };
+                                        let r_loc = Location {
+                                            def_id,
+                                            place: *r_place,
+                                        };
+                                        self.constraints.push(Constraint {
+                                            kind: ConstraintKind::Copy,
+                                            tgt: l_loc,
+                                            src: Either::Left(r_loc),
+                                        });
+                                    } else {
+                                        unreachable!()
+                                    }
+                                }
+                            } else {
+                                self.recognize_assign(l_place, r_place, def_id);
+                            }
                         }
                         _ => todo!("unexpected kind of right operand: {:?}", r_operand),
                     },
@@ -490,7 +577,6 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
 
         while !work_list.is_empty() {
             let node = work_list.pop_front().unwrap();
-            debug!("process node: {:?}", node);
             let pts = &self.points_to[&node];
             for point_to in pts {
                 for constraint in &constraints {
@@ -509,31 +595,25 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
                             self.constraint_graph.add_edge(src_index, tgt_index, ());
                             work_list.push_back(*pt_loc);
                         }
-                    } else {
-                        if constraint.kind == ConstraintKind::Store && node == constraint.tgt {
-                            let pt_loc = if let Either::Left(loc) = point_to {
-                                loc
-                            } else {
-                                unreachable!(
-                                    "state variables should not appear in store constraint"
-                                )
-                            };
+                    } else if constraint.kind == ConstraintKind::Store && node == constraint.tgt {
+                        let pt_loc = if let Either::Left(loc) = point_to {
+                            loc
+                        } else {
+                            unreachable!("state variables should not appear in store constraint")
+                        };
 
-                            let src = constraint.src;
-                            let src_loc = if let Either::Left(loc) = src {
-                                loc
-                            } else {
-                                unreachable!(
-                                    "state variables should not appear in store constraint"
-                                )
-                            };
+                        let src = constraint.src;
+                        let src_loc = if let Either::Left(loc) = src {
+                            loc
+                        } else {
+                            unreachable!("state variables should not appear in store constraint")
+                        };
 
-                            let src_index = self.loc_to_index[&src_loc];
-                            let tgt_index = self.loc_to_index[pt_loc];
-                            if !self.constraint_graph.contains_edge(src_index, tgt_index) {
-                                self.constraint_graph.add_edge(src_index, tgt_index, ());
-                                work_list.push_back(src_loc);
-                            }
+                        let src_index = self.loc_to_index[&src_loc];
+                        let tgt_index = self.loc_to_index[pt_loc];
+                        if !self.constraint_graph.contains_edge(src_index, tgt_index) {
+                            self.constraint_graph.add_edge(src_index, tgt_index, ());
+                            work_list.push_back(src_loc);
                         }
                     }
                 }
@@ -557,6 +637,16 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
                     }
                 }
             }
+        }
+    }
+
+    fn concrete_ty(&self, ty: Ty<'tcx>, method: &Method<'tcx>) -> Ty<'tcx> {
+        if utils::is_concrete(ty.kind()) {
+            ty
+        } else {
+            let generic_args_map =
+                utils::generate_generic_args_map(self.tcx, method.def_id, method.substs);
+            utils::specialize_type_generic_arg(self.tcx, ty, &generic_args_map)
         }
     }
 }

@@ -1,14 +1,12 @@
-use crate::control_flow::InterproceduralCFG;
-use crate::ifds::{
-    binary_domain::BinaryDomain,
-    problem::{FlowFunction, IfdsProblem},
+use crate::{
+    control_flow::InterproceduralCFG,
+    ifds::{binary_domain::BinaryDomain, problem::IfdsProblem},
 };
 use log::*;
-use std::fmt::Debug;
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Debug,
     hash::Hash,
-    marker::PhantomData,
 };
 
 /// An edge function computes how a domain value changes when flowing from one
@@ -201,7 +199,7 @@ where
         HashMap<(Icfg::Node, Icfg::Node), HashMap<Problem::Fact, HashSet<Problem::Fact>>>,
     computed_inter_edges:
         HashMap<(Icfg::Node, Icfg::Node), HashMap<Problem::Fact, HashSet<Problem::Fact>>>,
-    problem: Problem,
+    pub problem: Problem,
     zero_value: Problem::Fact,
     jump_functions: JumpFunctions<Icfg::Node, Problem::Fact>,
     /// The line 21 of original IFDS algorithm asks to evaluate the inverse of the flow function:
@@ -374,33 +372,31 @@ where
             if self.icfg.is_exit(&tgt) {
                 debug!("process exit: {:?}", path_edge);
                 self.process_exit(path_edge);
-            } else {
-                if self.icfg.is_call(&tgt) {
-                    let callees = self.icfg.get_callees_of_call_at(&tgt);
-                    let mut process_as_normal = false;
-                    for callee in &callees {
-                        if self.icfg.is_special_method(callee) {
-                            assert!(
-                                callees.len() == 1,
-                                "we can't process virtual calling of special method {:?}",
-                                callee
-                            );
-                            // Treats invocation of special methods as special instructions,
-                            // because that their behavior can be pre-defined.
-                            process_as_normal = true;
-                        }
+            } else if self.icfg.is_call(&tgt) {
+                let callees = self.icfg.get_callees_of_call_at(&tgt);
+                let mut process_as_normal = false;
+                for callee in &callees {
+                    if self.icfg.is_special_method(callee) {
+                        assert!(
+                            callees.len() == 1,
+                            "we can't process virtual calling of special method {:?}",
+                            callee
+                        );
+                        // Treats invocation of special methods as special instructions,
+                        // because that their behavior can be pre-defined.
+                        process_as_normal = true;
                     }
-                    if process_as_normal {
-                        debug!("process call as normal: {:?}", path_edge);
-                        self.process_normal(path_edge);
-                    } else {
-                        debug!("process call: {:?}", path_edge);
-                        self.process_call(path_edge);
-                    }
-                } else {
-                    debug!("process normal: {:?}", path_edge);
-                    self.process_normal(path_edge);
                 }
+                if process_as_normal {
+                    debug!("process call as normal: {:?}", path_edge);
+                    self.process_normal(path_edge);
+                } else {
+                    debug!("process call: {:?}", path_edge);
+                    self.process_call(path_edge);
+                }
+            } else {
+                debug!("process normal: {:?}", path_edge);
+                self.process_normal(path_edge);
             }
         }
     }
@@ -725,26 +721,24 @@ where
                     }
                 }
             }
-        } else {
-            if self.icfg.is_call(&node) {
-                for callee in self.icfg.get_callees_of_call_at(&node) {
-                    if self.icfg.is_special_method(callee) {
-                        continue;
-                    }
-                    let call_flow_function = self.problem.get_call_flow_function(&node, callee);
-                    let facts_at_callee_sp = self.zeroed_results(&fact, call_flow_function(&fact));
-                    for fact_at_callee_sp in facts_at_callee_sp {
-                        let call_edge_fn = if fact == self.zero_value {
-                            EdgeFunction::AllBottom
-                        } else {
-                            EdgeFunction::Identity
-                        };
+        } else if self.icfg.is_call(&node) {
+            for callee in self.icfg.get_callees_of_call_at(&node) {
+                if self.icfg.is_special_method(callee) {
+                    continue;
+                }
+                let call_flow_function = self.problem.get_call_flow_function(&node, callee);
+                let facts_at_callee_sp = self.zeroed_results(&fact, call_flow_function(&fact));
+                for fact_at_callee_sp in facts_at_callee_sp {
+                    let call_edge_fn = if fact == self.zero_value {
+                        EdgeFunction::AllBottom
+                    } else {
+                        EdgeFunction::Identity
+                    };
 
-                        for callee_sp in self.icfg.get_start_points_of(callee) {
-                            let value = call_edge_fn
-                                .compute_target(self.get_value(node.clone(), fact.clone()));
-                            new_tasks.push((callee_sp.clone(), fact_at_callee_sp.clone(), value))
-                        }
+                    for callee_sp in self.icfg.get_start_points_of(callee) {
+                        let value =
+                            call_edge_fn.compute_target(self.get_value(node.clone(), fact.clone()));
+                        new_tasks.push((callee_sp.clone(), fact_at_callee_sp.clone(), value))
                     }
                 }
             }

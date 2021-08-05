@@ -12,8 +12,17 @@ pub enum KnownNames {
     CoreOpsFunctionFnCall,
     CoreOpsFunctionFnCallMut,
     CoreOpsFunctionFnOnceCallOnce,
+    CorePanickingAssertFailed,
+    CorePanickingBeginPanic,
+    CoreOpsPanickingBeginPanicFmt,
     RustAlloc,
+    RustMem,
     LiquidIntrinsicsRequire,
+    LiquidStorageValueInitialize,
+    LiquidStorageValueGet,
+    LiquidStorageValueGetMut,
+    LiquidStorageValueSet,
+    LiquidStorageValueMutateWith,
     LiquidStorageCollectionsMappingInitialize,
     LiquidStorageCollectionsMappingLen,
     LiquidStorageCollectionsMappingInsert,
@@ -22,11 +31,20 @@ pub enum KnownNames {
     LiquidStorageCollectionsMappingIndexMut,
     LiquidStorageCollectionsMappingGet,
     LiquidStorageCollectionsMappingGetMut,
+    LiquidStorageCollectionsMappingMutateWith,
+    LiquidStorageCollectionsMappingExtend,
+    LiquidStorageCollectionsMappingRemove,
+    LiquidStorageCollectionsMappingIsEmpty,
+    LiquidStorageCollectionsVecInitialize,
+    LiquidStorageCollectionsVecUse,
+    LiquidStorageCollectionsIterableMappingInitialize,
+    LiquidStorageCollectionsIterableMappingUse,
     LiquidEnvGetCaller,
     LiquidEnvGetOrigin,
     LiquidEnvNow,
     LiquidEnvGetAddress,
     LiquidEnvGetBlockNumber,
+    LiquidEnvCall,
     None,
 }
 
@@ -55,6 +73,8 @@ impl KnownNames {
         Self::get_def_data_path_elem_name(path_iter.next())
             .map(|name| match name.as_str().deref() {
                 "ops" => Self::get_known_name_for_core_ops(path_iter),
+                "mem" => Self::RustMem,
+                "panicking" => Self::get_known_name_for_core_panicking(path_iter),
                 _ => KnownNames::None,
             })
             .unwrap_or(KnownNames::None)
@@ -76,6 +96,17 @@ impl KnownNames {
             .unwrap_or(KnownNames::None)
     }
 
+    fn get_known_name_for_core_panicking(mut path_iter: PathIter<'_>) -> Self {
+        Self::get_def_data_path_elem_name(path_iter.next())
+            .map(|n| match n.as_str().deref() {
+                "assert_failed" => KnownNames::CorePanickingAssertFailed,
+                "begin_panic" | "panic" => KnownNames::CorePanickingBeginPanic,
+                "begin_panic_fmt" | "panic_fmt" => KnownNames::CoreOpsPanickingBeginPanicFmt,
+                _ => KnownNames::None,
+            })
+            .unwrap_or(KnownNames::None)
+    }
+
     fn get_known_name_for_core_ops(mut path_iter: PathIter<'_>) -> Self {
         Self::get_def_data_path_elem_name(path_iter.next())
             .map(|n| match n.as_str().deref() {
@@ -90,7 +121,7 @@ impl KnownNames {
             .map(|name| match name.as_str().deref() {
                 "intrinsics" => Self::get_known_name_for_liquid_intrinsics(path_iter),
                 "lang_core" => Self::get_known_name_for_liquid_core(path_iter),
-                "env_access" => Self::get_known_name_for_liquid_env(path_iter),
+                "env_access" => Self::get_known_name_for_liquid_env_access(path_iter),
                 _ => KnownNames::None,
             })
             .unwrap_or(KnownNames::None)
@@ -109,12 +140,18 @@ impl KnownNames {
         Self::get_def_data_path_elem_name(path_iter.next())
             .map(|n| match n.as_str().deref() {
                 "storage" => Self::get_known_name_for_liquid_storage(path_iter),
+                "env" => Self::get_def_data_path_elem_name(path_iter.next())
+                    .map(|n| match n.as_str().deref() {
+                        "api" => Self::get_known_name_for_liquid_env_api(path_iter),
+                        _ => KnownNames::None,
+                    })
+                    .unwrap_or(KnownNames::None),
                 _ => KnownNames::None,
             })
             .unwrap_or(KnownNames::None)
     }
 
-    fn get_known_name_for_liquid_env(mut path_iter: PathIter<'_>) -> Self {
+    fn get_known_name_for_liquid_env_access(mut path_iter: PathIter<'_>) -> Self {
         if let Some(DisambiguatedDefPathData { data: Impl, .. }) = path_iter.next() {
             Self::get_def_data_path_elem_name(path_iter.next())
                 .map(|n| match n.as_str().deref() {
@@ -131,10 +168,20 @@ impl KnownNames {
         }
     }
 
+    fn get_known_name_for_liquid_env_api(mut path_iter: PathIter<'_>) -> Self {
+        Self::get_def_data_path_elem_name(path_iter.next())
+            .map(|n| match n.as_str().deref() {
+                "call" => KnownNames::LiquidEnvCall,
+                _ => KnownNames::None,
+            })
+            .unwrap_or(KnownNames::None)
+    }
+
     fn get_known_name_for_liquid_storage(mut path_iter: PathIter<'_>) -> Self {
         Self::get_def_data_path_elem_name(path_iter.next())
             .map(|n| match n.as_str().deref() {
                 "collections" => Self::get_known_name_for_liquid_collections(path_iter),
+                "value" => Self::get_known_name_for_liquid_value(path_iter),
                 _ => KnownNames::None,
             })
             .unwrap_or(KnownNames::None)
@@ -144,9 +191,28 @@ impl KnownNames {
         Self::get_def_data_path_elem_name(path_iter.next())
             .map(|n| match n.as_str().deref() {
                 "mapping" => Self::get_known_name_for_liquid_mapping(path_iter),
+                "vec" => Self::get_known_name_for_liquid_vec(path_iter),
+                "iterable_mapping" => Self::get_known_name_for_liquid_iterable_mapping(path_iter),
                 _ => KnownNames::None,
             })
             .unwrap_or(KnownNames::None)
+    }
+
+    fn get_known_name_for_liquid_value(mut path_iter: PathIter<'_>) -> Self {
+        if let Some(DisambiguatedDefPathData { data: Impl, .. }) = path_iter.next() {
+            Self::get_def_data_path_elem_name(path_iter.next())
+                .map(|n| match n.as_str().deref() {
+                    "initialize" => KnownNames::LiquidStorageValueInitialize,
+                    "get" => KnownNames::LiquidStorageValueGet,
+                    "get_mut" => KnownNames::LiquidStorageValueGetMut,
+                    "set" => KnownNames::LiquidStorageValueSet,
+                    "mutate_with" => KnownNames::LiquidStorageValueMutateWith,
+                    _ => KnownNames::None,
+                })
+                .unwrap_or(KnownNames::None)
+        } else {
+            KnownNames::None
+        }
     }
 
     fn get_known_name_for_liquid_mapping(mut path_iter: PathIter<'_>) -> Self {
@@ -168,6 +234,62 @@ impl KnownNames {
                                 "index_mut" => KnownNames::LiquidStorageCollectionsMappingIndexMut,
                                 "get" => KnownNames::LiquidStorageCollectionsMappingGet,
                                 "get_mut" => KnownNames::LiquidStorageCollectionsMappingGetMut,
+                                "mutate_with" => {
+                                    KnownNames::LiquidStorageCollectionsMappingMutateWith
+                                }
+                                "extend" => KnownNames::LiquidStorageCollectionsMappingExtend,
+                                "remove" => KnownNames::LiquidStorageCollectionsMappingRemove,
+                                "is_empty" => KnownNames::LiquidStorageCollectionsMappingIsEmpty,
+                                _ => KnownNames::None,
+                            })
+                            .unwrap_or(KnownNames::None)
+                    } else {
+                        KnownNames::None
+                    }
+                }
+                _ => KnownNames::None,
+            })
+            .unwrap_or(KnownNames::None)
+    }
+
+    fn get_known_name_for_liquid_vec(mut path_iter: PathIter<'_>) -> Self {
+        Self::get_def_data_path_elem_name(path_iter.next())
+            .map(|n| match n.as_str().deref() {
+                "impls" => {
+                    if let Some(DisambiguatedDefPathData { data: Impl, .. }) = path_iter.next() {
+                        Self::get_def_data_path_elem_name(path_iter.next())
+                            .map(|n| match n.as_str().deref() {
+                                "initialize" => KnownNames::LiquidStorageCollectionsVecInitialize,
+                                "len" | "is_empty" | "index" | "index_mut" | "get" | "get_mut"
+                                | "mutate_with" | "push" | "pop" | "swap" | "swap_remove"
+                                | "extend" => KnownNames::LiquidStorageCollectionsVecUse,
+                                _ => KnownNames::None,
+                            })
+                            .unwrap_or(KnownNames::None)
+                    } else {
+                        KnownNames::None
+                    }
+                }
+                _ => KnownNames::None,
+            })
+            .unwrap_or(KnownNames::None)
+    }
+
+    fn get_known_name_for_liquid_iterable_mapping(mut path_iter: PathIter<'_>) -> Self {
+        Self::get_def_data_path_elem_name(path_iter.next())
+            .map(|n| match n.as_str().deref() {
+                "impls" => {
+                    if let Some(DisambiguatedDefPathData { data: Impl, .. }) = path_iter.next() {
+                        Self::get_def_data_path_elem_name(path_iter.next())
+                            .map(|n| match n.as_str().deref() {
+                                "initialize" => {
+                                    KnownNames::LiquidStorageCollectionsIterableMappingInitialize
+                                }
+                                "len" | "is_empty" | "index" | "index_mut" | "get" | "get_mut"
+                                | "mutate_with" | "insert" | "remove" | "extend"
+                                | "contains_key" => {
+                                    KnownNames::LiquidStorageCollectionsIterableMappingUse
+                                }
                                 _ => KnownNames::None,
                             })
                             .unwrap_or(KnownNames::None)

@@ -18,7 +18,7 @@ pub struct UninitializedStates<'tcx, 'icfg> {
     tcx: TyCtxt<'tcx>,
     fields_count: usize,
     icfg: &'icfg ForwardCFG<'tcx>,
-    pfg: AndersonPFG<'icfg, 'tcx>,
+    pub pfg: AndersonPFG<'icfg, 'tcx>,
     constructor: MethodIndex,
 }
 
@@ -115,9 +115,13 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for UninitializedStates<'tcx, 'graph> {
                 let local_decls = &body.local_decls;
                 let callee_ty = func.ty(local_decls, self.tcx);
                 if let TyKind::FnDef(def_id, ..) = callee_ty.kind() {
-                    if KnownNames::get(self.tcx, *def_id)
-                        == KnownNames::LiquidStorageCollectionsMappingInitialize
-                    {
+                    if matches!(
+                        KnownNames::get(self.tcx, *def_id),
+                        KnownNames::LiquidStorageCollectionsMappingInitialize
+                            | KnownNames::LiquidStorageCollectionsVecInitialize
+                            | KnownNames::LiquidStorageValueInitialize
+                            | KnownNames::LiquidStorageCollectionsIterableMappingInitialize
+                    ) {
                         let receiver = &args[0];
                         let points_to = self.pfg.get_points_to(
                             curr_method.def_id,

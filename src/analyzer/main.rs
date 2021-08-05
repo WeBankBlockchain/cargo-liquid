@@ -7,6 +7,7 @@ extern crate rustc_driver;
 extern crate rustc_hir;
 extern crate rustc_infer;
 extern crate rustc_middle;
+extern crate rustc_mir;
 extern crate rustc_session;
 extern crate rustc_span;
 extern crate rustc_target;
@@ -81,11 +82,11 @@ fn main() {
                 compiler.run()
             });
 
-            let exit_code = if matches!(result, Ok(_)) {
+            let exit_code = if matches!(result, Ok(Ok(_))) {
                 info!("analysis process executed successfully");
                 rustc_driver::EXIT_SUCCESS
             } else {
-                warn!("analysis process executed unsuccessfully");
+                warn!("analysis process executed resulting in failure");
                 rustc_driver::EXIT_FAILURE
             };
             process::exit(exit_code);

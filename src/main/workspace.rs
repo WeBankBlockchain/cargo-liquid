@@ -236,10 +236,12 @@ impl Manifest {
             rewrite_path(
                 lib,
                 "lib",
-                default_path.to_str().expect(&format!(
-                    "the manifest path contains invalid UTF-8 characters: {:?}",
-                    default_path
-                )),
+                default_path.to_str().unwrap_or_else(|| {
+                    panic!(
+                        "the manifest path contains invalid UTF-8 characters: {:?}",
+                        default_path
+                    )
+                }),
             )?;
         }
 

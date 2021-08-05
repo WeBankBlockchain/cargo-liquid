@@ -1,7 +1,7 @@
 mod builder;
 mod cfg;
 mod pfg;
-mod utils;
+pub(crate) mod utils;
 
 pub(crate) use builder::Builder;
 pub(crate) use cfg::{BackwardCFG, ForwardCFG, Method, MethodIndex};

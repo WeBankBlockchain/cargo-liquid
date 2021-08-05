@@ -14,6 +14,7 @@ use rustc_middle::{
     },
     ty::{ConstKind, ParamEnv, ScalarInt, Ty, TyCtxt, TyKind},
 };
+use rustc_mir::dataflow::{impls::MaybeBorrowedLocals, Analysis};
 use rustc_span::def_id::DefId;
 use rustc_target::abi::Size;
 use std::{
@@ -49,7 +50,8 @@ pub struct ConflictFields<'tcx, 'graph> {
     icfg: &'graph BackwardCFG<'graph, 'tcx>,
     pfg: AndersonPFG<'graph, 'tcx>,
     entry_point: MethodIndex,
-    pub var_defs: HashMap<DefId, HashMap<Local, Vec<AccessPath>>>,
+    var_defs: HashMap<DefId, HashMap<Local, Vec<AccessPath>>>,
+    maybe_mut_borrowed: HashMap<DefId, HashSet<Local>>,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
@@ -110,6 +112,7 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                 pfg,
                 entry_point,
                 var_defs: Default::default(),
+                maybe_mut_borrowed: Default::default(),
             }
         } else {
             unreachable!("`Storage` should be a struct type")
@@ -194,12 +197,24 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
             }
         }
 
-        for (def_id, method_defs) in &self.var_defs {
-            debug!("var defs for {:?}", def_id);
-            for (local, def) in method_defs {
-                debug!("\t{:?} = {:?}", local, def);
+        let param_env = ParamEnv::reveal_all();
+        let mut results = MaybeBorrowedLocals::mut_borrows_only(self.tcx, body, param_env)
+            .unsound_ignore_borrow_on_drop()
+            .into_engine(self.tcx, body)
+            .iterate_to_fixpoint()
+            .into_results_cursor(body);
+
+        let mut maybe_mut_borrowed_in_method = HashSet::new();
+        for bb in body.basic_blocks().indices() {
+            results.seek_before_primary_effect(body.terminator_loc(bb));
+            let state = results.get();
+            for local in state.iter() {
+                maybe_mut_borrowed_in_method.insert(local);
             }
         }
+
+        self.maybe_mut_borrowed
+            .insert(def_id, maybe_mut_borrowed_in_method);
     }
 
     fn reify(&self, access_path: AccessPath, def_id: DefId) -> Vec<AccessPath> {
@@ -244,6 +259,7 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
         let dst = dst.unwrap();
         let src = src.unwrap();
 
+        let maybe_mut_borrowed = self.maybe_mut_borrowed.clone();
         if dst.fields.is_empty() && src.fields.is_empty() {
             return Box::new(move |fact| {
                 let mut results = HashSet::new();
@@ -255,15 +271,20 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                 {
                     if let Key::Var(_, access_path) = key {
                         if dst.base == access_path.base {
-                            results.insert(ConflictField::Field {
-                                container: *container,
-                                key: Key::Var(
+                            let key = if maybe_mut_borrowed[&src_method_id].contains(&src.base) {
+                                Key::All
+                            } else {
+                                Key::Var(
                                     src_method_id,
                                     AccessPath {
                                         base: src.base,
                                         fields: access_path.fields.clone(),
                                     },
-                                ),
+                                )
+                            };
+                            results.insert(ConflictField::Field {
+                                container: *container,
+                                key,
                                 read_only: *read_only,
                             });
                         } else {
@@ -290,17 +311,24 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                     if let Key::Var(_, access_path) = key {
                         if dst.base == access_path.base {
                             for reified_src in &reified_srcs {
-                                let mut composed_fields = reified_src.fields.clone();
-                                composed_fields.extend(access_path.fields.clone());
-                                results.insert(ConflictField::Field {
-                                    container: *container,
-                                    key: Key::Var(
+                                let key = if maybe_mut_borrowed[&src_method_id]
+                                    .contains(&reified_src.base)
+                                {
+                                    Key::All
+                                } else {
+                                    let mut composed_fields = reified_src.fields.clone();
+                                    composed_fields.extend(access_path.fields.clone());
+                                    Key::Var(
                                         src_method_id,
                                         AccessPath {
                                             base: reified_src.base,
                                             fields: composed_fields,
                                         },
-                                    ),
+                                    )
+                                };
+                                results.insert(ConflictField::Field {
+                                    container: *container,
+                                    key,
                                     read_only: *read_only,
                                 });
                             }
@@ -332,16 +360,22 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                                 && reified_dst.fields
                                     == access_path.fields[..reified_dst.fields.len()]
                             {
-                                results.insert(ConflictField::Field {
-                                    container: *container,
-                                    key: Key::Var(
+                                let key = if maybe_mut_borrowed[&src_method_id].contains(&src.base)
+                                {
+                                    Key::All
+                                } else {
+                                    Key::Var(
                                         src_method_id,
                                         AccessPath {
                                             base: src.base,
                                             fields: access_path.fields[reified_dst.fields.len()..]
                                                 .to_vec(),
                                         },
-                                    ),
+                                    )
+                                };
+                                results.insert(ConflictField::Field {
+                                    container: *container,
+                                    key,
                                     read_only: *read_only,
                                 });
                                 results.insert(fact.clone());
@@ -572,6 +606,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                 .collect::<Vec<_>>();
             assert_eq!(actual_args.len(), param_args.len());
 
+            let maybe_mut_borrowed = self.maybe_mut_borrowed.clone();
             Box::new(move |fact| {
                 let mut results = HashSet::new();
                 if let ConflictField::Field {
@@ -587,13 +622,19 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                             let actual_arg = &actual_args[pos];
                             let key = if let Some(actual_arg) = actual_arg {
                                 match actual_arg {
-                                    Either::Left(local) => Key::Var(
-                                        caller_id,
-                                        AccessPath {
-                                            base: *local,
-                                            fields: access_path.fields.clone(),
-                                        },
-                                    ),
+                                    Either::Left(local) => {
+                                        if maybe_mut_borrowed[&caller_id].contains(&local) {
+                                            Key::All
+                                        } else {
+                                            Key::Var(
+                                                caller_id,
+                                                AccessPath {
+                                                    base: *local,
+                                                    fields: access_path.fields.clone(),
+                                                },
+                                            )
+                                        }
+                                    }
                                     Either::Right(constant) => Key::Const(constant.clone()),
                                 }
                             } else {
@@ -630,6 +671,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
         let basic_block = curr.basic_block.unwrap();
         let bbd = &body.basic_blocks()[basic_block];
         let method_id = method.def_id;
+        let maybe_mut_borrowed = self.maybe_mut_borrowed.clone();
 
         if self.icfg.is_call(curr) {
             let terminator = bbd.terminator.as_ref().unwrap();
@@ -705,15 +747,26 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                 });
             }
 
+            // Special functions that needs results of pointer analysis.
             if matches!(
                 fn_name,
                 KnownNames::LiquidStorageCollectionsMappingContainsKey
+                    | KnownNames::LiquidStorageCollectionsMappingExtend
                     | KnownNames::LiquidStorageCollectionsMappingGet
                     | KnownNames::LiquidStorageCollectionsMappingGetMut
                     | KnownNames::LiquidStorageCollectionsMappingIndex
                     | KnownNames::LiquidStorageCollectionsMappingIndexMut
                     | KnownNames::LiquidStorageCollectionsMappingInsert
                     | KnownNames::LiquidStorageCollectionsMappingLen
+                    | KnownNames::LiquidStorageCollectionsMappingMutateWith
+                    | KnownNames::LiquidStorageCollectionsMappingRemove
+                    | KnownNames::LiquidStorageCollectionsMappingIsEmpty
+                    | KnownNames::LiquidStorageValueGet
+                    | KnownNames::LiquidStorageValueGetMut
+                    | KnownNames::LiquidStorageValueMutateWith
+                    | KnownNames::LiquidStorageValueSet
+                    | KnownNames::LiquidStorageCollectionsVecUse
+                    | KnownNames::LiquidStorageCollectionsIterableMappingUse
             ) {
                 let receiver = &args[0];
                 let points_to = self.pfg.get_points_to(
@@ -750,34 +803,27 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
 
                     if matches!(
                         fn_name,
-                        KnownNames::LiquidStorageCollectionsMappingContainsKey
-                            | KnownNames::LiquidStorageCollectionsMappingGet
-                            | KnownNames::LiquidStorageCollectionsMappingIndex
-                            | KnownNames::LiquidStorageCollectionsMappingGetMut
-                            | KnownNames::LiquidStorageCollectionsMappingIndexMut
+                        KnownNames::LiquidStorageValueGet
+                            | KnownNames::LiquidStorageValueGetMut
+                            | KnownNames::LiquidStorageValueMutateWith
+                            | KnownNames::LiquidStorageValueSet
+                            | KnownNames::LiquidStorageCollectionsMappingExtend
+                            | KnownNames::LiquidStorageCollectionsVecUse
+                            | KnownNames::LiquidStorageCollectionsIterableMappingUse
                     ) {
                         let this = &args[0];
                         let read_only = match this.ty(local_decls, self.tcx).kind() {
                             TyKind::Ref(_, _, mutable) => mutable != &Mutability::Mut,
                             _ => unreachable!(),
                         };
-                        let key = match &args[1] {
-                            Operand::Copy(place) | Operand::Move(place) => place.local,
-                            _ => unreachable!(),
-                        };
+
                         return Box::new(move |fact| {
                             if fact == &ConflictField::Zero {
                                 let mut results = HashSet::new();
                                 for container in &states {
                                     let new_fact = ConflictField::Field {
                                         container: *container,
-                                        key: Key::Var(
-                                            method_id,
-                                            AccessPath {
-                                                base: key,
-                                                fields: vec![],
-                                            },
-                                        ),
+                                        key: Key::All,
                                         read_only,
                                     };
                                     results.insert(new_fact);
@@ -789,8 +835,21 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                         });
                     }
 
-                    if matches!(fn_name, KnownNames::LiquidStorageCollectionsMappingInsert) {
-                        let key = match &args[1] {
+                    if matches!(
+                        fn_name,
+                        KnownNames::LiquidStorageCollectionsMappingContainsKey
+                            | KnownNames::LiquidStorageCollectionsMappingGet
+                            | KnownNames::LiquidStorageCollectionsMappingIndex
+                            | KnownNames::LiquidStorageCollectionsMappingGetMut
+                            | KnownNames::LiquidStorageCollectionsMappingIndexMut
+                            | KnownNames::LiquidStorageCollectionsMappingMutateWith
+                    ) {
+                        let this = &args[0];
+                        let read_only = match this.ty(local_decls, self.tcx).kind() {
+                            TyKind::Ref(_, _, mutable) => mutable != &Mutability::Mut,
+                            _ => unreachable!(),
+                        };
+                        let key_local = match &args[1] {
                             Operand::Copy(place) | Operand::Move(place) => place.local,
                             _ => unreachable!(),
                         };
@@ -798,15 +857,61 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                             if fact == &ConflictField::Zero {
                                 let mut results = HashSet::new();
                                 for container in &states {
-                                    results.insert(ConflictField::Field {
-                                        container: *container,
-                                        key: Key::Var(
+                                    let key = if maybe_mut_borrowed[&method_id].contains(&key_local)
+                                    {
+                                        Key::All
+                                    } else {
+                                        Key::Var(
                                             method_id,
                                             AccessPath {
-                                                base: key,
+                                                base: key_local,
                                                 fields: vec![],
                                             },
-                                        ),
+                                        )
+                                    };
+                                    let new_fact = ConflictField::Field {
+                                        container: *container,
+                                        key,
+                                        read_only,
+                                    };
+                                    results.insert(new_fact);
+                                }
+                                results
+                            } else {
+                                HashSet::from_iter([fact.clone()])
+                            }
+                        });
+                    }
+
+                    if matches!(
+                        fn_name,
+                        KnownNames::LiquidStorageCollectionsMappingInsert
+                            | KnownNames::LiquidStorageCollectionsMappingRemove
+                    ) {
+                        let key_local = match &args[1] {
+                            Operand::Copy(place) | Operand::Move(place) => place.local,
+                            _ => unreachable!(),
+                        };
+                        return Box::new(move |fact| {
+                            if fact == &ConflictField::Zero {
+                                let mut results = HashSet::new();
+                                for container in &states {
+                                    let key = if maybe_mut_borrowed[&method_id].contains(&key_local)
+                                    {
+                                        Key::All
+                                    } else {
+                                        Key::Var(
+                                            method_id,
+                                            AccessPath {
+                                                base: key_local,
+                                                fields: vec![],
+                                            },
+                                        )
+                                    };
+
+                                    results.insert(ConflictField::Field {
+                                        container: *container,
+                                        key,
                                         read_only: false,
                                     });
                                     results.insert(ConflictField::Field {
@@ -822,7 +927,11 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                         });
                     }
 
-                    if matches!(fn_name, KnownNames::LiquidStorageCollectionsMappingLen) {
+                    if matches!(
+                        fn_name,
+                        KnownNames::LiquidStorageCollectionsMappingLen
+                            | KnownNames::LiquidStorageCollectionsMappingIsEmpty
+                    ) {
                         return Box::new(move |fact| {
                             if fact == &ConflictField::Zero {
                                 let mut results = HashSet::new();

@@ -73,11 +73,11 @@ enum AnalysisBehavior {
     Default,
 }
 
-impl Into<xargo_lib::Verbosity> for VerbosityBehavior {
-    fn into(self) -> xargo_lib::Verbosity {
-        match self {
-            Self::Verbose => xargo_lib::Verbosity::Verbose,
-            Self::Quiet => xargo_lib::Verbosity::Quiet,
+impl From<VerbosityBehavior> for xargo_lib::Verbosity {
+    fn from(behavior: VerbosityBehavior) -> Self {
+        match behavior {
+            VerbosityBehavior::Verbose => Self::Verbose,
+            VerbosityBehavior::Quiet => Self::Quiet,
         }
     }
 }

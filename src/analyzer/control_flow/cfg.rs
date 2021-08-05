@@ -11,6 +11,7 @@
 // limitations under the License.
 
 use crate::control_flow::{utils, InterproceduralCFG};
+#[allow(unused_imports)]
 use log::*;
 use petgraph::{
     graph::{DiGraph, NodeIndex},
@@ -80,11 +81,11 @@ pub struct CallSite {
 
 pub struct ForwardCFG<'tcx> {
     pub tcx: TyCtxt<'tcx>,
-    pub(in crate::control_flow) start_point: HashMap<MethodIndex, NodeIndex>,
-    pub(in crate::control_flow) end_points: HashMap<MethodIndex, Vec<NodeIndex>>,
-    pub(in crate::control_flow) methods: Vec<Method<'tcx>>,
-    pub(in crate::control_flow) graph: DiGraph<Node, Edge<'tcx>>,
-    pub(in crate::control_flow) node_to_index: HashMap<Node, NodeIndex>,
+    pub(crate) start_point: HashMap<MethodIndex, NodeIndex>,
+    pub(crate) end_points: HashMap<MethodIndex, Vec<NodeIndex>>,
+    pub(crate) methods: Vec<Method<'tcx>>,
+    pub(crate) graph: DiGraph<Node, Edge<'tcx>>,
+    pub(crate) node_to_index: HashMap<Node, NodeIndex>,
 }
 
 impl<'tcx> ForwardCFG<'tcx> {
@@ -189,9 +190,10 @@ impl<'tcx> ForwardCFG<'tcx> {
 
         let mut dot_file = fs::File::create(path)?;
         writeln!(dot_file, "strict digraph {{")?;
+        writeln!(dot_file, "    newrank=true")?;
         writeln!(dot_file, "    node [fontname=monospace shape=box]")?;
         writeln!(dot_file, "    edge [samehead=h1, sametail=t1]")?;
-        writeln!(dot_file, "    rankdir=TB");
+        writeln!(dot_file, "    rankdir=TB")?;
 
         let mut node_groups = HashMap::new();
         for (i, node) in self.graph.raw_nodes().iter().enumerate() {
@@ -222,14 +224,14 @@ impl<'tcx> ForwardCFG<'tcx> {
 
         for (i, (method_index, nodes)) in node_groups.iter().enumerate() {
             let method = self.get_method_by_index(*method_index);
-            writeln!(dot_file, "    subgraph cluster_{} {{", i);
-            writeln!(dot_file, "        label=<<table border='1' cellborder='1'>");
+            writeln!(dot_file, "    subgraph cluster_{} {{", i)?;
+            writeln!(dot_file, "        label=<<table border='1' cellborder='1'>")?;
             {
-                write!(dot_file, "<tr><td colspan=\"2\">");
+                write!(dot_file, "<tr><td colspan=\"2\">")?;
                 use std::fmt::Write;
                 let mut escaper = Escaper::new(&mut dot_file, EscapeMode::Html);
-                write!(escaper, "{:?}", method.def_id);
-                write!(dot_file, "</td></tr>");
+                write!(escaper, "{:?}", method.def_id).unwrap();
+                write!(dot_file, "</td></tr>")?;
             }
             let substs = &method.substs;
             let self_ty = &method.self_ty;
@@ -237,20 +239,25 @@ impl<'tcx> ForwardCFG<'tcx> {
                 use std::fmt::Write;
 
                 if let Some(self_ty) = self_ty {
-                    write!(dot_file, "<tr><td>Self</td><td>");
+                    write!(dot_file, "<tr><td>Self</td><td>")?;
                     let mut escaper = Escaper::new(&mut dot_file, EscapeMode::Html);
-                    write!(escaper, "{}", self_ty);
-                    write!(dot_file, "</td></tr>");
+                    write!(escaper, "{}", self_ty).unwrap();
+                    write!(dot_file, "</td></tr>")?;
                 }
 
                 InternalSubsts::for_item(self.tcx, method.def_id, |param_def, _| {
                     let actual_arg = substs.get(param_def.index as usize);
                     debug_assert!(actual_arg.is_some());
                     let actual_arg = actual_arg.unwrap();
-                    write!(dot_file, "<tr><td>{}</td><td>", param_def.name);
+                    write!(dot_file, "<tr><td>").unwrap();
+                    {
+                        let mut escaper = Escaper::new(&mut dot_file, EscapeMode::Html);
+                        write!(escaper, "{}", param_def.name).unwrap();
+                    }
+                    write!(dot_file, "</td><td>").unwrap();
                     let mut escaper = Escaper::new(&mut dot_file, EscapeMode::Html);
-                    write!(escaper, "{}", actual_arg);
-                    write!(dot_file, "</td></tr>");
+                    write!(escaper, "{}", actual_arg).unwrap();
+                    write!(dot_file, "</td></tr>").unwrap();
                     self.tcx.mk_param_from_def(param_def)
                 });
             }
@@ -259,26 +266,27 @@ impl<'tcx> ForwardCFG<'tcx> {
             for (i, node) in nodes {
                 let method = self.get_method_by_index(node.belongs_to);
                 use std::fmt::Write;
-                write!(dot_file, "        {} [label=\"", i);
+                write!(dot_file, "        {} [label=\"", i)?;
 
                 let mut escaper = Escaper::new(&mut dot_file, EscapeMode::Dot);
 
                 match node.kind {
                     NodeKind::Call => {
                         let basic_block = node.basic_block.unwrap();
-                        write!(escaper, "bb{}(call-counterpart):\n", basic_block.as_usize());
+                        writeln!(escaper, "bb{}(call-counterpart):", basic_block.as_usize())
+                            .unwrap();
                         let terminator = self.tcx.optimized_mir(method.def_id).basic_blocks()
                             [basic_block]
                             .terminator
                             .as_ref();
                         // For call nodes, don't print the statements but only print `Call` terminator.
                         if let Some(terminator) = terminator {
-                            write!(escaper, "{:?};\n", terminator.kind);
+                            writeln!(escaper, "{:?};", terminator.kind).unwrap();
                         }
                     }
                     NodeKind::Normal => {
                         let basic_block = node.basic_block.unwrap();
-                        write!(escaper, "bb{}:\n", basic_block.as_usize());
+                        writeln!(escaper, "bb{}:", basic_block.as_usize()).unwrap();
                         let BasicBlockData {
                             ref statements,
                             ref terminator,
@@ -286,25 +294,25 @@ impl<'tcx> ForwardCFG<'tcx> {
                         } = self.tcx.optimized_mir(method.def_id).basic_blocks()[basic_block];
 
                         for statement in statements {
-                            write!(escaper, "{:?};\n", statement);
+                            writeln!(escaper, "{:?};", statement).unwrap();
                         }
                         if let Some(terminator) = terminator {
                             if !matches!(terminator.kind, TerminatorKind::Call { .. }) {
-                                write!(escaper, "{:?};\n", terminator.kind);
+                                writeln!(escaper, "{:?};", terminator.kind).unwrap();
                             }
                         }
                     }
                     NodeKind::Start => {
-                        write!(escaper, "start node");
+                        write!(escaper, "start node").unwrap();
                     }
                     NodeKind::End => {
-                        write!(escaper, "end node");
+                        write!(escaper, "end node").unwrap();
                     }
                     NodeKind::Fake(cause) => {
-                        write!(escaper, "{:?}", cause);
+                        write!(escaper, "{:?}", cause).unwrap();
                     }
                 }
-                writeln!(dot_file, "\"]");
+                writeln!(dot_file, "\"]")?;
             }
 
             if let Some(edges) = &edge_groups.get(method) {
@@ -314,38 +322,38 @@ impl<'tcx> ForwardCFG<'tcx> {
                     } else {
                         ""
                     };
-                    writeln!(dot_file, "        {} -> {}{}", src_idx, tgt_idx, attr);
+                    writeln!(dot_file, "        {} -> {}{}", src_idx, tgt_idx, attr)?;
                 }
             }
 
-            writeln!(dot_file, "    }}");
+            writeln!(dot_file, "    }}")?;
         }
 
         for (srg_idx, tgt_idx, weight) in cross_edges {
-            write!(dot_file, "    {} -> {} [style=bold,", srg_idx, tgt_idx);
+            write!(dot_file, "    {} -> {} [style=bold,", srg_idx, tgt_idx)?;
             let kind = weight.kind;
             match kind {
                 EdgeKind::Call => {
-                    write!(dot_file, "color=blue,label=\"CALL\"");
+                    write!(dot_file, "color=blue,label=\"CALL\"")?;
                 }
                 EdgeKind::Return => {
-                    write!(dot_file, "color=green,label=\"RETURN\"");
+                    write!(dot_file, "color=green,label=\"RETURN\"")?;
                 }
                 _ => unreachable!(),
             }
             if !weight.is_certain {
-                write!(dot_file, ",style=dashed");
+                write!(dot_file, ",style=dashed")?;
             }
-            writeln!(dot_file, "]");
+            writeln!(dot_file, "]")?;
         }
 
-        writeln!(dot_file, "    start [shape=Mdiamond]");
+        writeln!(dot_file, "    start [shape=Mdiamond]")?;
         let ep_indices = (0..ep_count).fold(vec![], |mut acc, ep_index| {
             acc.push(self.start_point[&ep_index]);
             acc
         });
         for ep_index in ep_indices {
-            writeln!(dot_file, "    start -> {}", ep_index.index());
+            writeln!(dot_file, "    start -> {}", ep_index.index())?;
         }
         writeln!(dot_file, "}}")
     }
@@ -355,7 +363,6 @@ impl<'tcx> InterproceduralCFG for ForwardCFG<'tcx> {
     type Method = Method<'tcx>;
 
     fn get_start_points_of(&self, method: &Self::Method) -> Vec<&Self::Node> {
-        debug!("get_start_points_of {:?}", method);
         let method_index = self.get_method_index(method);
         let start_point = self.start_point[&method_index];
         vec![self.graph.node_weight(start_point).unwrap()]
@@ -374,11 +381,11 @@ impl<'tcx> InterproceduralCFG for ForwardCFG<'tcx> {
     }
 
     fn is_exit(&self, node: &Self::Node) -> bool {
-        node.kind == NodeKind::End
+        matches!(node.kind, NodeKind::Fake(..) | NodeKind::End)
     }
 
     fn is_start_point(&self, node: &Self::Node) -> bool {
-        node.kind == NodeKind::Start
+        matches!(node.kind, NodeKind::Fake(..) | NodeKind::Start)
     }
 
     fn is_special_method(&self, method: &Self::Method) -> bool {
