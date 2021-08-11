@@ -212,12 +212,7 @@ fn build_cargo_project(
         true
     };
 
-    let build_result = run_xargo_build(
-        crate_metadata,
-        use_gm,
-        verbosity_behavior,
-        skip_analysis,
-    );
+    let build_result = run_xargo_build(crate_metadata, use_gm, verbosity_behavior, skip_analysis);
 
     if analysis_behavior != AnalysisBehavior::Skip {
         env::set_var(
@@ -407,29 +402,38 @@ pub(crate) fn execute_build(
     println!("[4/4] {} Generating ABI file", PAPER);
     generate_abi(&crate_metadata, verbosity_behavior)?;
 
-    let cfa_result: Value = serde_json::from_str(&build_result).unwrap();
-    let cfa_result = cfa_result.as_object().unwrap();
-
-    let abi_content = fs::read_to_string(&crate_metadata.dest_abi).unwrap();
-    let mut origin_abi: Value = serde_json::from_str(&abi_content).unwrap();
-    origin_abi
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .for_each(|method| {
-            let method = method.as_object_mut().unwrap();
-            if method.contains_key("name")
-                && method.contains_key("type")
-                && method["type"] == Value::String("function".into())
-            {
-                let method_name = String::from(method["name"].as_str().unwrap());
-                if cfa_result.contains_key(&method_name) {
-                    method.insert("conflictFields".into(), cfa_result[&method_name].clone());
-                }
-            }
-        });
-    let new_abi = serde_json::to_string(&origin_abi).unwrap();
-    fs::write(&crate_metadata.dest_abi, new_abi).unwrap();
+    if analysis_behavior != AnalysisBehavior::Skip {
+        if let Ok(cfa_result) = serde_json::from_str::<'_, Value>(&build_result) {
+            let cfa_result = cfa_result.as_object().unwrap();
+            let abi_content = fs::read_to_string(&crate_metadata.dest_abi).unwrap();
+            let mut origin_abi: Value = serde_json::from_str(&abi_content).unwrap();
+            origin_abi
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .for_each(|method| {
+                    let method = method.as_object_mut().unwrap();
+                    if method.contains_key("name")
+                        && method.contains_key("type")
+                        && method["type"] == Value::String("function".into())
+                    {
+                        let method_name = String::from(method["name"].as_str().unwrap());
+                        if cfa_result.contains_key(&method_name) {
+                            method
+                                .insert("conflictFields".into(), cfa_result[&method_name].clone());
+                        }
+                    }
+                });
+            let new_abi = serde_json::to_string(&origin_abi).unwrap();
+            fs::write(&crate_metadata.dest_abi, new_abi).unwrap();
+        } else {
+            eprintln!(
+                "{}\n{}",
+                "unable to parse the result of conflict fields analysis:".yellow(),
+                build_result
+            );
+        }
+    }
 
     Ok(format!(
         "\n{}Done in {}, your project is ready now:\n{: >6}: {}\n{: >6}: {}",
