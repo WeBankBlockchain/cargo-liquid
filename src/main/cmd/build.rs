@@ -19,15 +19,18 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use console::Emoji;
 use indicatif::HumanDuration;
+use itertools::Itertools;
 use parity_wasm::elements::{Module, Section};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::{
+    collections::HashMap,
     env, fs,
     io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
     time::Instant,
 };
+use tiny_keccak::Hasher;
 
 struct CrateMetadata {
     cargo_meta: cargo_metadata::Metadata,
@@ -314,6 +317,46 @@ fn optimize_wasm(crate_metadata: &CrateMetadata) -> Result<()> {
     Ok(())
 }
 
+fn parse_ty(ty_info: &Map<String, Value>) -> String {
+    const TUPLE_TY: &str = "tuple";
+
+    let ty = ty_info.get("type").unwrap().as_str().unwrap();
+    if ty.starts_with(TUPLE_TY) {
+        let components = ty_info.get("components").unwrap().as_array().unwrap();
+        let component_types = components
+            .iter()
+            .map(|component| parse_ty(component.as_object().unwrap()))
+            .join(",");
+        format!("({}){}", component_types, &ty[TUPLE_TY.len()..])
+    } else {
+        String::from(ty)
+    }
+}
+
+fn calc_selector(source: &[u8]) -> String {
+    let mut hasher_buffer = [0u8; 32];
+    // The length of LEB128-encoded a 32-bit unsigned integer is at most 5.
+    let mut leb128_buffer = [0u8; 5];
+
+    let mut keccak_hasher = tiny_keccak::Keccak::v256();
+    keccak_hasher.update(source);
+    keccak_hasher.finalize(&mut hasher_buffer);
+
+    let selector = u32::from_le_bytes([
+        hasher_buffer[0],
+        hasher_buffer[1],
+        hasher_buffer[2],
+        hasher_buffer[3],
+    ]);
+
+    let size = {
+        let mut writer = &mut leb128_buffer[..];
+        leb128::write::signed(&mut writer, (selector as i32) as i64).unwrap()
+    };
+
+    unsafe { String::from_utf8_unchecked(leb128_buffer[..size].to_vec()) }
+}
+
 fn generate_abi(crate_meta: &CrateMetadata, verbosity_behavior: VerbosityBehavior) -> Result<()> {
     utils::check_channel()?;
 
@@ -351,6 +394,69 @@ fn generate_abi(crate_meta: &CrateMetadata, verbosity_behavior: VerbosityBehavio
             .status()
             .context(format!("Error executing `{:?}`", cmd))?;
         if status.success() {
+            let dest_wasm = &crate_meta.dest_wasm;
+            let mut wasm_content =
+                unsafe { String::from_utf8_unchecked(fs::read(dest_wasm).unwrap()) };
+
+            let dest_abi = &crate_meta.dest_abi;
+            let abi_content = fs::read_to_string(dest_abi)?;
+            let abi: Map<String, Value> = serde_json::from_str(&abi_content)?;
+
+            let mut sel_replacements = HashMap::new();
+            for (_, fns) in &abi {
+                let fns = fns.as_array().unwrap();
+                for f in fns {
+                    let fn_info = f.as_object().unwrap();
+                    let ty = fn_info.get("type").unwrap().as_str().unwrap();
+                    if ty == "function" {
+                        let fn_name = fn_info.get("name").unwrap().as_str().unwrap();
+                        let inputs = fn_info.get("inputs").unwrap().as_array().unwrap();
+                        let sig = inputs
+                            .iter()
+                            .map(|input| parse_ty(input.as_object().unwrap()))
+                            .join(",");
+                        let sig = format!("{}({})", fn_name, sig);
+
+                        let old_sel = calc_selector(fn_name.as_bytes());
+                        let new_sel = calc_selector(sig.as_bytes());
+                        let entry = sel_replacements.entry(old_sel).or_insert((
+                            0,
+                            new_sel.clone(),
+                            String::from(fn_name),
+                        ));
+                        if entry.0 != 0 && entry.1 != new_sel {
+                            anyhow::bail!("method `{}` cannot be invoked correctly, please rename this method or modify its signature", fn_name)
+                        }
+                        entry.0 += 1;
+                    }
+                }
+            }
+
+            for (old_sel, (count, new_sel, fn_name)) in sel_replacements {
+                let match_indices = wasm_content.match_indices(&old_sel).collect::<Vec<_>>();
+
+                if match_indices.len() != count {
+                    anyhow::bail!("method `{}` cannot be invoked correctly, please rename this method or modify its signature", fn_name)
+                }
+
+                for i in 0..match_indices.len() - 1 {
+                    let curr_match = &match_indices[i];
+                    let next_match = &match_indices[i + 1];
+                    if curr_match.0 + old_sel.len() >= next_match.0 {
+                        anyhow::bail!("method `{}` cannot be invoked correctly, please rename this method or modify its signature", fn_name)
+                    }
+                }
+
+                wasm_content = wasm_content.replace(&old_sel, &new_sel);
+            }
+
+            let mut wasm_file = fs::File::create(dest_wasm)?;
+            wasm_file.write_all(wasm_content.as_bytes())?;
+
+            let local_abi = abi.get("$local").unwrap();
+            let mut abi_file = fs::File::create(dest_abi)?;
+            abi_file.write_all(serde_json::to_string(local_abi)?.as_bytes())?;
+
             Ok(())
         } else {
             anyhow::bail!("`{:?}` failed with exit code: {:?}", cmd, status.code())

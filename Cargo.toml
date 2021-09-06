@@ -29,6 +29,8 @@ either = "*"
 serde = "*"
 serde_json = "*"
 itertools = "*"
+leb128 = "*"
+tiny-keccak = { version = "*", features = ["keccak"] }
 
 [build-dependencies]
 anyhow = "1.0.32"
