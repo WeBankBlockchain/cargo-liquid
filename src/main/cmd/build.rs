@@ -333,21 +333,27 @@ fn parse_ty(ty_info: &Map<String, Value>) -> String {
     }
 }
 
-fn calc_selector(source: &[u8]) -> String {
-    let mut hasher_buffer = [0u8; 32];
-    // The length of LEB128-encoded a 32-bit unsigned integer is at most 5.
-    let mut leb128_buffer = [0u8; 5];
-
-    let mut keccak_hasher = tiny_keccak::Keccak::v256();
-    keccak_hasher.update(source);
-    keccak_hasher.finalize(&mut hasher_buffer);
+fn calc_selector(source: &[u8], use_gm: bool) -> String {
+    let hash_result = if !use_gm {
+        let mut hash_result = [0u8; 32];
+        let mut keccak_hasher = tiny_keccak::Keccak::v256();
+        keccak_hasher.update(source);
+        keccak_hasher.finalize(&mut hash_result);
+        hash_result
+    } else {
+        let mut sm3_hash = libsm::sm3::hash::Sm3Hash::new(source);
+        sm3_hash.get_hash()
+    };
 
     let selector = u32::from_le_bytes([
-        hasher_buffer[0],
-        hasher_buffer[1],
-        hasher_buffer[2],
-        hasher_buffer[3],
+        hash_result[0],
+        hash_result[1],
+        hash_result[2],
+        hash_result[3],
     ]);
+
+    // The length of LEB128-encoded a 32-bit unsigned integer is at most 5.
+    let mut leb128_buffer = [0u8; 5];
 
     let size = {
         let mut writer = &mut leb128_buffer[..];
@@ -357,7 +363,11 @@ fn calc_selector(source: &[u8]) -> String {
     unsafe { String::from_utf8_unchecked(leb128_buffer[..size].to_vec()) }
 }
 
-fn generate_abi(crate_meta: &CrateMetadata, verbosity_behavior: VerbosityBehavior) -> Result<()> {
+fn generate_abi(
+    crate_meta: &CrateMetadata,
+    verbosity_behavior: VerbosityBehavior,
+    use_gm: bool,
+) -> Result<()> {
     utils::check_channel()?;
 
     let build = |manifest_path: &ManifestPath| -> Result<()> {
@@ -417,15 +427,20 @@ fn generate_abi(crate_meta: &CrateMetadata, verbosity_behavior: VerbosityBehavio
                             .join(",");
                         let sig = format!("{}({})", fn_name, sig);
 
-                        let old_sel = calc_selector(fn_name.as_bytes());
-                        let new_sel = calc_selector(sig.as_bytes());
+                        let old_sel = calc_selector(fn_name.as_bytes(), use_gm);
+                        let new_sel = calc_selector(sig.as_bytes(), use_gm);
                         let entry = sel_replacements.entry(old_sel).or_insert((
                             0,
                             new_sel.clone(),
                             String::from(fn_name),
                         ));
                         if entry.0 != 0 && entry.1 != new_sel {
-                            anyhow::bail!("method `{}` cannot be invoked correctly, please rename this method or modify its signature", fn_name)
+                            anyhow::bail!(
+                                "method `{}` cannot be invoked correctly, please rename this method or modify its signature: old_selector = {}, new_selector = {}",
+                                fn_name,  
+                                entry.1,
+                                new_sel
+                            )
                         }
                         entry.0 += 1;
                     }
@@ -436,14 +451,24 @@ fn generate_abi(crate_meta: &CrateMetadata, verbosity_behavior: VerbosityBehavio
                 let match_indices = wasm_content.match_indices(&old_sel).collect::<Vec<_>>();
 
                 if match_indices.len() != count {
-                    anyhow::bail!("method `{}` cannot be invoked correctly, please rename this method or modify its signature", fn_name)
+                    anyhow::bail!(
+                        "method `{}` cannot be invoked correctly, please rename this method or modify its signature: match_indices.len() = {}, count= {}",
+                        fn_name,match_indices.len(),
+                        count
+                    )
                 }
 
                 for i in 0..match_indices.len() - 1 {
                     let curr_match = &match_indices[i];
                     let next_match = &match_indices[i + 1];
                     if curr_match.0 + old_sel.len() >= next_match.0 {
-                        anyhow::bail!("method `{}` cannot be invoked correctly, please rename this method or modify its signature", fn_name)
+                        anyhow::bail!(
+                            "method `{}` cannot be invoked correctly, please rename this method or modify its signature: current_match = {}, old_selector.len() = {}, next_match = {}",
+                            fn_name,
+                            curr_match.0,
+                            old_sel.len(),
+                            next_match.0
+                        )
                     }
                 }
 
@@ -506,7 +531,7 @@ pub(crate) fn execute_build(
     optimize_wasm(&crate_metadata)?;
 
     println!("[4/4] {} Generating ABI file", PAPER);
-    generate_abi(&crate_metadata, verbosity_behavior)?;
+    generate_abi(&crate_metadata, verbosity_behavior, use_gm)?;
 
     if analysis_behavior != AnalysisBehavior::Skip {
         if let Ok(cfa_result) = serde_json::from_str::<'_, Value>(&build_result) {

@@ -31,6 +31,7 @@ serde_json = "*"
 itertools = "*"
 leb128 = "*"
 tiny-keccak = { version = "*", features = ["keccak"] }
+libsm = "*"
 
 [build-dependencies]
 anyhow = "1.0.32"
