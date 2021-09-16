@@ -48,6 +48,7 @@ impl CrateMetadata {
 }
 
 const BUILD_TARGET_ARCH: &str = "wasm32-unknown-unknown";
+const LOCAL_SCOPE: &str = "$local";
 
 /// Parses the manifest and returns relevant metadata.
 fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata> {
@@ -269,7 +270,7 @@ fn optimize_wasm(crate_metadata: &CrateMetadata) -> Result<()> {
     // Perform optimization.
     //
     // In practice only tree-shaking is performed, i.e transitively removing all symbols that are
-    // NOT used by the specified entrypoints.
+    // NOT used by the specified entry points.
     if pwasm_utils::optimize(
         &mut module,
         ["main", "deploy", "memory", "hash_type"].to_vec(),
@@ -412,67 +413,96 @@ fn generate_abi(
             let abi_content = fs::read_to_string(dest_abi)?;
             let abi: Map<String, Value> = serde_json::from_str(&abi_content)?;
 
-            let mut sel_replacements = HashMap::new();
-            for (_, fns) in &abi {
+            let mut sel_replacements: HashMap<String, HashMap<String, _>> = HashMap::new();
+            for (scope, fns) in &abi {
+                let is_iface = scope != LOCAL_SCOPE;
                 let fns = fns.as_array().unwrap();
                 for f in fns {
                     let fn_info = f.as_object().unwrap();
                     let ty = fn_info.get("type").unwrap().as_str().unwrap();
                     if ty == "function" {
-                        let fn_name = fn_info.get("name").unwrap().as_str().unwrap();
+                        let fn_name = fn_info.get("name").unwrap().as_str().unwrap().to_string();
                         let inputs = fn_info.get("inputs").unwrap().as_array().unwrap();
                         let sig = inputs
                             .iter()
                             .map(|input| parse_ty(input.as_object().unwrap()))
                             .join(",");
                         let sig = format!("{}({})", fn_name, sig);
-
-                        let old_sel = calc_selector(fn_name.as_bytes(), use_gm);
                         let new_sel = calc_selector(sig.as_bytes(), use_gm);
-                        let entry = sel_replacements.entry(old_sel).or_insert((
-                            0,
-                            new_sel.clone(),
-                            String::from(fn_name),
-                        ));
-                        if entry.0 != 0 && entry.1 != new_sel {
-                            anyhow::bail!(
-                                "method `{}` cannot be invoked correctly, please rename this method or modify its signature: old_selector = {}, new_selector = {}",
-                                fn_name,  
-                                entry.1,
-                                new_sel
-                            )
-                        }
-                        entry.0 += 1;
+
+                        let old_sel = if is_iface {
+                            calc_selector((scope.to_owned() + &fn_name).as_bytes(), use_gm)
+                        } else {
+                            calc_selector(fn_name.as_bytes(), use_gm)
+                        };
+
+                        let entry = sel_replacements
+                            .entry(scope.to_owned())
+                            .or_insert(HashMap::new());
+                        assert!(!entry.contains_key(&fn_name));
+                        entry.insert(fn_name, (old_sel, new_sel));
                     }
                 }
             }
 
-            for (old_sel, (count, new_sel, fn_name)) in sel_replacements {
-                let match_indices = wasm_content.match_indices(&old_sel).collect::<Vec<_>>();
+            for (scope, replacements) in sel_replacements {
+                for (fn_name, (old_sel, new_sel)) in replacements {
+                    let match_indices = wasm_content.match_indices(&old_sel).collect::<Vec<_>>();
+                    let err_msg = format!(
+                        "method `{}` in `{}` cannot be invoked correctly, please rename this method",
+                        fn_name,
+                        if scope == LOCAL_SCOPE {
+                            "contract"
+                        } else {
+                            &scope
+                        }
+                    );
 
-                if match_indices.len() != count {
-                    anyhow::bail!(
-                        "method `{}` cannot be invoked correctly, please rename this method or modify its signature: match_indices.len() = {}, count= {}",
-                        fn_name,match_indices.len(),
-                        count
-                    )
-                }
+                    // It's legal that length of match_indices <= 1. For example, if an interface contains
+                    // a method but the method is never used, then this method will be optimized out
+                    // in optimization phase, which causes `match_indices` is empty.
+                    //
+                    // ## Caution
+                    // For now, we can't handle the situation that the method is optimized out but in
+                    // rest of bytecode there is another occurrence with same sequence of bytes.
+                    if match_indices.len() > 1 {
+                        anyhow::bail!(err_msg);
+                    }
 
-                for i in 0..match_indices.len() - 1 {
-                    let curr_match = &match_indices[i];
-                    let next_match = &match_indices[i + 1];
-                    if curr_match.0 + old_sel.len() >= next_match.0 {
-                        anyhow::bail!(
-                            "method `{}` cannot be invoked correctly, please rename this method or modify its signature: current_match = {}, old_selector.len() = {}, next_match = {}",
-                            fn_name,
-                            curr_match.0,
-                            old_sel.len(),
-                            next_match.0
-                        )
+                    if match_indices.len() == 1 {
+                        let match_pos = match_indices[0].0;
+                        assert!(
+                            match_pos != 0,
+                            "legal Wasm bytecode should start with [0, 'a', 's', 'm']"
+                        );
+
+                        // In Wasm, representation of `i32.const` instruction is 0x41.
+                        if wasm_content.as_bytes()[match_pos - 1] != 0x41 {
+                            anyhow::bail!(err_msg);
+                        }
+                        wasm_content = wasm_content.replace(&old_sel, &new_sel);
+
+                        #[cfg(debug_assertions)]
+                        {
+                            let bytes_to_hex = |str: &String| {
+                                let mut s = String::with_capacity(str.len() * 2);
+                                use std::fmt::Write;
+                                for byte in str.as_bytes() {
+                                    let _ = write!(s, "{:02x}", byte);
+                                }
+                                s
+                            };
+
+                            eprintln!(
+                                "rewrite selector for {}::{}: {} -> {}",
+                                scope,
+                                fn_name,
+                                bytes_to_hex(&old_sel),
+                                bytes_to_hex(&new_sel)
+                            );
+                        }
                     }
                 }
-
-                wasm_content = wasm_content.replace(&old_sel, &new_sel);
             }
 
             let mut wasm_file = fs::File::create(dest_wasm)?;

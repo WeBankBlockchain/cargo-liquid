@@ -37,7 +37,7 @@ use rustc_middle::{
 };
 use serde::Serialize;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, LinkedList},
     env, fs,
     ops::Deref,
     path::PathBuf,
@@ -79,51 +79,57 @@ impl rustc_driver::Callbacks for AnalysisCallbacks {
     }
 }
 
+mod field_kind {
+    pub type Type = u8;
+
+    /// `0` represents `All`, which means the contract attempts to visit a `Value<T>` or the
+    /// key for reading/writing other types of containers can not be inferred during static
+    /// program analysis.
+    pub const ALL: Type = 0;
+    /// `1` represents `Len`, which means the contract may change length of some a container.
+    /// It's only meaningful to containers such like `Vec<T>`, `Mapping<K, V>` or
+    /// `IterableMapping<K, V>`.
+    pub const LEN: Type = 1;
+    /// `2` represents `Env`, which means the contract wants to use some values from
+    /// execution context as keys to visit containers.
+    pub const ENV: Type = 2;
+    /// `3` represents `Var`, which means the contract wants to use some values from method
+    /// parameters as keys to visit containers.
+    pub const VAR: Type = 3;
+    /// `4` represents `Const`, which means the contract wants to use some constant values as
+    /// keys to visit containers.
+    pub const CONST: Type = 4;
+}
+
+mod env_info_kind {
+    pub type Type = usize;
+
+    /// `0` represents caller of transaction.
+    pub const CALLER: Type = 0;
+    /// `1` represents origin sender of transaction.
+    pub const ORIGIN: Type = 1;
+    /// `2` represents timestamp of current block.
+    pub const NOW: Type = 2;
+    /// `3` represents height of current block.
+    pub const BLOCK_NUMBER: Type = 3;
+    /// `4` represents self address of current contract.
+    pub const ADDR: Type = 3;
+}
+
 impl AnalysisCallbacks {
     fn analyze_conflict_fields<'tcx>(
         &self,
-        mut_methods: Vec<MethodIndex>,
+        mut_methods: &Vec<MethodIndex>,
+        external_methods: &HashMap<DefId, MethodAttr>,
         tcx: TyCtxt<'tcx>,
         fwd_cfg: &ForwardCFG<'tcx>,
         storage_ty: Ty<'tcx>,
     ) {
-        type FieldKind = u8;
-        type EnvInfoKind = usize;
-
-        /// `0` represents `All`, which means the contract attempts to visit a `Value<T>` or the
-        /// key for reading/writing other types of containers can not be inferred during static
-        /// program analysis.
-        const FIELD_KIND_ALL: FieldKind = 0;
-        /// `1` represents `Len`, which means the contract may change length of some a container.
-        /// It's only meaningful to containers such like `Vec<T>`, `Mapping<K, V>` or
-        /// `IterableMapping<K, V>`.
-        const FIELD_KIND_LEN: FieldKind = 1;
-        /// `2` represents `Env`, which means the contract wants to use some values from
-        /// execution context as keys to visit containers.
-        const FIELD_KIND_ENV: FieldKind = 2;
-        /// `3` represents `Var`, which means the contract wants to use some values from method
-        /// parameters as keys to visit containers.
-        const FIELD_KIND_VAR: FieldKind = 3;
-        /// `4` represents `Const`, which means the contract wants to use some constant values as
-        /// keys to visit containers.
-        const FIELD_KIND_CONST: FieldKind = 4;
-
-        /// `0` represents caller of transaction.
-        const ENV_KIND_CALLER: EnvInfoKind = 0;
-        /// `1` represents origin sender of transaction.
-        const ENV_KIND_ORIGIN: EnvInfoKind = 1;
-        /// `2` represents timestamp of current block.
-        const ENV_KIND_NOW: EnvInfoKind = 2;
-        /// `3` represents height of current block.
-        const ENV_KIND_BLOCK_NUMBER: EnvInfoKind = 3;
-        /// `4` represents self address of current contract.
-        const ENV_KIND_ADDR: EnvInfoKind = 3;
-
         #[derive(Serialize, PartialOrd, Ord, PartialEq, Eq, Hash, Clone)]
         struct FieldDesc {
             /// The index of which state variable will be visited.
             slot: usize,
-            kind: FieldKind,
+            kind: field_kind::Type,
             /// If `kind` equals to `All` or `Len`, then `path` must be empty;
             ///
             /// if `kind` equals to `Env`, then `path` must only contain one element, and the element
@@ -140,19 +146,53 @@ impl AnalysisCallbacks {
             read_only: bool,
         }
 
+        let contains_interface_invocation = |method| {
+            let mut visited = HashSet::new();
+            let mut work_list = LinkedList::new();
+            work_list.push_back(method);
+
+            while !work_list.is_empty() {
+                let curr_method = work_list.pop_front().unwrap();
+                let call_sites = fwd_cfg.get_call_sites_within(curr_method);
+                let callees = call_sites
+                    .iter()
+                    .map(|call_site| fwd_cfg.get_callees_of_call_at(call_site))
+                    .flatten()
+                    .collect::<Vec<_>>();
+
+                for callee in callees {
+                    let callee_id = callee.def_id;
+                    if external_methods.contains_key(&callee_id) {
+                        return true;
+                    }
+
+                    if !visited.contains(callee) {
+                        visited.insert(callee);
+                        work_list.push_back(callee);
+                    }
+                }
+            }
+            false
+        };
+
         let target_dir = PathBuf::from(env::var("LIQUID_ANALYSIS_TARGET_DIR").unwrap());
         let bwd_cfg = BackwardCFG::new(&fwd_cfg);
         let mut field_descs = HashMap::new();
 
         for method_index in mut_methods {
+            let method_index = *method_index;
             let method = bwd_cfg.get_method_by_index(method_index);
-            let problem = ConflictFields::new(tcx, &bwd_cfg, method_index, storage_ty);
-            let mut ifds_solver = IfdsSolver::new(problem, &bwd_cfg, true);
-            ifds_solver.solve();
-            let end_point = bwd_cfg.get_end_points_of(method);
-            debug_assert!(end_point.len() == 1);
-            let end_point = end_point[0];
-            let results = ifds_solver.get_results_at(end_point);
+            let results = if contains_interface_invocation(method) {
+                HashSet::new()
+            } else {
+                let problem = ConflictFields::new(tcx, &bwd_cfg, method_index, storage_ty);
+                let mut ifds_solver = IfdsSolver::new(problem, &bwd_cfg, true);
+                ifds_solver.solve();
+                let end_point = bwd_cfg.get_end_points_of(method);
+                debug_assert!(end_point.len() == 1);
+                let end_point = end_point[0];
+                ifds_solver.get_results_at(end_point)
+            };
 
             let method_id = method.def_id;
             let fn_name = tcx.item_name(method_id);
@@ -167,36 +207,36 @@ impl AnalysisCallbacks {
                     } = conflict_field
                     {
                         let (kind, path) = match key {
-                            Key::All => (FIELD_KIND_ALL, vec![]),
-                            Key::Len => (FIELD_KIND_LEN, vec![]),
+                            Key::All => (field_kind::ALL, vec![]),
+                            Key::Len => (field_kind::LEN, vec![]),
                             Key::Env(env_kind) => (
-                                FIELD_KIND_ENV,
+                                field_kind::ENV,
                                 vec![match env_kind {
-                                    EnvKind::Caller => ENV_KIND_CALLER,
-                                    EnvKind::Origin => ENV_KIND_ORIGIN,
-                                    EnvKind::Now => ENV_KIND_NOW,
-                                    EnvKind::BlockNumber => ENV_KIND_BLOCK_NUMBER,
-                                    EnvKind::Address => ENV_KIND_ADDR,
+                                    EnvKind::Caller => env_info_kind::CALLER,
+                                    EnvKind::Origin => env_info_kind::ORIGIN,
+                                    EnvKind::Now => env_info_kind::NOW,
+                                    EnvKind::BlockNumber => env_info_kind::BLOCK_NUMBER,
+                                    EnvKind::Address => env_info_kind::ADDR,
                                 }],
                             ),
                             Key::Var(def_id, access_path) => {
                                 if def_id != &method_id {
-                                    (FIELD_KIND_ALL, vec![])
+                                    (field_kind::ALL, vec![])
                                 } else {
                                     let body = tcx.optimized_mir(method_id);
                                     let arg_count = body.arg_count;
                                     let base = access_path.base;
                                     if base.index() > arg_count {
-                                        (FIELD_KIND_ALL, vec![])
+                                        (field_kind::ALL, vec![])
                                     } else {
                                         let mut path = vec![base.index() - 2];
                                         path.extend(access_path.fields.iter());
-                                        (FIELD_KIND_VAR, path)
+                                        (field_kind::VAR, path)
                                     }
                                 }
                             }
                             Key::Const(bytes) => (
-                                FIELD_KIND_CONST,
+                                field_kind::CONST,
                                 bytes.iter().map(|byte| *byte as usize).collect::<Vec<_>>(),
                             ),
                         };
@@ -221,7 +261,7 @@ impl AnalysisCallbacks {
                     .iter()
                     .rposition(|field| {
                         field.slot == field_to_add.slot
-                            && field.kind == FIELD_KIND_ALL
+                            && field.kind == field_kind::ALL
                             && field.read_only == field_to_add.read_only
                     })
                     .is_none()
@@ -261,7 +301,9 @@ impl AnalysisCallbacks {
                     i += 1;
                 }
             }
-            field_descs.insert(fn_name, composed_conflict_fields);
+            if !composed_conflict_fields.is_empty() {
+                field_descs.insert(fn_name, composed_conflict_fields);
+            }
         }
 
         fs::write(
@@ -536,7 +578,7 @@ impl AnalysisCallbacks {
         tcx: TyCtxt<'tcx>,
         fwd_cfg: &ForwardCFG<'tcx>,
         imm_methods: Vec<MethodIndex>,
-        external_methods: HashMap<DefId, MethodAttr>,
+        external_methods: &HashMap<DefId, MethodAttr>,
         compiler: &Compiler,
     ) {
         let session = compiler.session();
@@ -590,7 +632,6 @@ impl AnalysisCallbacks {
                                 &format!(
                                     "attempt to invoke this \
                                     mutable external interface from an immutable entry point,\
-                                
                                     \n         while previous call path is `{}`",
                                     &call_path_msg
                                 ),
@@ -687,8 +728,8 @@ impl AnalysisCallbacks {
                     Either::Right(i)
                 }
             });
-        self.analyze_conflict_fields(mut_methods, tcx, &fwd_cfg, storage_ty);
-        self.detect_mutable_invocations(tcx, &fwd_cfg, imm_methods, external_methods, compiler);
+        self.detect_mutable_invocations(tcx, &fwd_cfg, imm_methods, &external_methods, compiler);
+        self.analyze_conflict_fields(&mut_methods, &external_methods, tcx, &fwd_cfg, storage_ty);
     }
 
     fn collect_method_attrs<'tcx>(
