@@ -58,9 +58,6 @@ enum VerbosityBehavior {
 
 #[derive(StructOpt)]
 struct AnalysisFlags {
-    /// If this flag is set, the analysis process will be forced to started.
-    #[structopt(long)]
-    enforce_analysis: bool,
     /// If this flag is set, the analysis process will be skipped unconditionally.
     #[structopt(long)]
     skip_analysis: bool,
@@ -68,9 +65,8 @@ struct AnalysisFlags {
 
 #[derive(PartialEq, Eq, Copy, Clone)]
 enum AnalysisBehavior {
-    Skip,
     Enforce,
-    Default,
+    Skip,
 }
 
 impl From<VerbosityBehavior> for xargo_lib::Verbosity {
@@ -99,13 +95,10 @@ impl TryFrom<&AnalysisFlags> for AnalysisBehavior {
     type Error = Error;
 
     fn try_from(value: &AnalysisFlags) -> Result<Self, Self::Error> {
-        match (value.skip_analysis, value.enforce_analysis) {
-            (true, false) => Ok(AnalysisBehavior::Skip),
-            (false, false) => Ok(AnalysisBehavior::Default),
-            (false, true) => Ok(AnalysisBehavior::Enforce),
-            (true, true) => {
-                anyhow::bail!("Cannot pass both --skip-analysis and --enforce-analysis flags")
-            }
+        if value.skip_analysis {
+            Ok(AnalysisBehavior::Skip)
+        } else {
+            Ok(AnalysisBehavior::Enforce)
         }
     }
 }
@@ -122,8 +115,8 @@ impl TryFrom<&AnalysisFlags> for AnalysisBehavior {
 // unconditionally displaying stale messages from the analyzer even the analyzer
 // never be started, which is sometimes misleading.
 //
-// To debug liquid-analy or adjust configuration of it, you can turn the
-// `enforce_analysis` flag on, otherwise you can just obey the default rule of cargo.
+// By default, we will force cargo to start a new compiling session. If you don't want
+// to compile again, you can turn`enforce_analysis` flag on.
 #[derive(StructOpt)]
 enum Command {
     /// Sets up and creates a new liquid project.

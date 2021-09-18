@@ -35,7 +35,6 @@ std = [
     "scale/std",
     "liquid_primitives/std",
     "liquid_prelude/std",
-    "liquid_abi_codec/std",
     "liquid_macro/std",
     "liquid_ty_mapping/std",
 ]
