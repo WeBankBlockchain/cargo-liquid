@@ -125,7 +125,7 @@ impl AnalysisCallbacks {
         fwd_cfg: &ForwardCFG<'tcx>,
         storage_ty: Ty<'tcx>,
     ) {
-        #[derive(Serialize, PartialOrd, Ord, PartialEq, Eq, Hash, Clone)]
+        #[derive(Serialize, PartialOrd, Ord, PartialEq, Eq, Hash, Clone, Debug)]
         struct FieldDesc {
             /// The index of which state variable will be visited.
             slot: usize,
@@ -446,12 +446,45 @@ impl AnalysisCallbacks {
     }
 
     fn related_to<'tcx>(tcx: TyCtxt<'tcx>, ty: &Ty<'tcx>, tys: &HashSet<Ty<'tcx>>) -> bool {
+        const VEC_ITER_NS: [&str; 6] = [
+            "lang_core",
+            "storage",
+            "collections",
+            "vec",
+            "impls",
+            "Iter",
+        ];
+        const ITERABLE_MAPPING_ITER_NS: [&str; 6] = [
+            "lang_core",
+            "storage",
+            "collections",
+            "iterable_mapping",
+            "impls",
+            "Iter",
+        ];
+
         if tys.contains(ty) {
             return true;
         }
 
         match ty.kind() {
             TyKind::Adt(adt_def, substs) => {
+                let def_path = tcx
+                    .def_path(adt_def.did)
+                    .data
+                    .iter()
+                    .filter_map(|disambiguated_def_path_data| {
+                        if let DefPathData::TypeNs(symbol) = disambiguated_def_path_data.data {
+                            Some(symbol.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if def_path == VEC_ITER_NS || def_path == ITERABLE_MAPPING_ITER_NS {
+                    return false;
+                }
+
                 let field_tys = adt_def
                     .all_fields()
                     .map(|field_def| field_def.ty(tcx, substs))
@@ -549,8 +582,10 @@ impl AnalysisCallbacks {
                             session.span_err(
                                 local_decl.source_info.span,
                                 &format!(
-                                    "can't use container type or storage here, whose type is `{}`",
+                                    "can't use container type or storage here, whose type is `{}`.\n{}",
                                     local_ty,
+                                    "Note: this is an error from static analysis, if you don't need analysis results \
+                                    please use `--skip-analysis` option to skip the analysis process"
                                 ),
                             );
                             session.abort_if_errors();

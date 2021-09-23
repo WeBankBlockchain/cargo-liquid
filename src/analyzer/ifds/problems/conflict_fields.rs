@@ -246,17 +246,87 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
     fn process_assignment(
         &self,
         dst: &Place<'tcx>,
-        src: &Place<'tcx>,
+        src: Option<&Place<'tcx>>,
         dst_method_id: DefId,
         src_method_id: DefId,
     ) -> FlowFunction<'tcx, <Self as IfdsProblem<'tcx>>::Fact> {
         let dst = AccessPath::try_from(dst);
-        let src = AccessPath::try_from(src);
-
-        if dst.is_err() || src.is_err() {
+        if dst.is_err() {
             return Self::identity();
         }
         let dst = dst.unwrap();
+
+        if src.is_none() {
+            if dst.fields.is_empty() {
+                return Box::new(move |fact| {
+                    let mut results = HashSet::new();
+                    if let ConflictField::Field {
+                        container,
+                        key,
+                        read_only,
+                    } = fact
+                    {
+                        if let Key::Var(_, access_path) = key {
+                            if dst.base == access_path.base {
+                                let key = Key::All;
+                                results.insert(ConflictField::Field {
+                                    container: *container,
+                                    key,
+                                    read_only: *read_only,
+                                });
+                            } else {
+                                results.insert(fact.clone());
+                            }
+                        } else {
+                            results.insert(fact.clone());
+                        }
+                    }
+                    results
+                });
+            } else {
+                let reified_dsts = self.reify(dst, dst_method_id);
+                return Box::new(move |fact| {
+                    let mut results = HashSet::new();
+                    if let ConflictField::Field {
+                        container,
+                        key,
+                        read_only,
+                    } = fact
+                    {
+                        if let Key::Var(_, access_path) = key {
+                            let mut poisoned = false;
+                            for reified_dst in &reified_dsts {
+                                if reified_dst.base == access_path.base
+                                    && reified_dst.fields.len() <= access_path.fields.len()
+                                    && reified_dst.fields
+                                        == access_path.fields[..reified_dst.fields.len()]
+                                {
+                                    results.insert(ConflictField::Field {
+                                        container: *container,
+                                        key: Key::All,
+                                        read_only: *read_only,
+                                    });
+                                    poisoned = true;
+                                    break;
+                                }
+                            }
+
+                            if !poisoned {
+                                results.insert(fact.clone());
+                            }
+                        } else {
+                            results.insert(fact.clone());
+                        }
+                    }
+                    results
+                });
+            }
+        }
+
+        let src = AccessPath::try_from(src.unwrap());
+        if src.is_err() {
+            return Self::identity();
+        }
         let src = src.unwrap();
 
         let maybe_mut_borrowed = self.maybe_mut_borrowed.clone();
@@ -354,6 +424,7 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                 } = fact
                 {
                     if let Key::Var(_, access_path) = key {
+                        let mut all_propagated = true;
                         for reified_dst in &reified_dsts {
                             if reified_dst.base == access_path.base
                                 && reified_dst.fields.len() <= access_path.fields.len()
@@ -378,10 +449,13 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                                     key,
                                     read_only: *read_only,
                                 });
-                                results.insert(fact.clone());
                             } else {
-                                results.insert(fact.clone());
+                                all_propagated = false;
                             }
+                        }
+
+                        if !all_propagated {
+                            results.insert(fact.clone());
                         }
                     } else {
                         results.insert(fact.clone());
@@ -410,11 +484,11 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                         // The remaining bytes must be 0.
                         let size = int.size().bytes() as usize;
                         let data = if int == &ScalarInt::ZST {
-                            0
+                            0u128
                         } else {
                             int.to_bits(int.size()).unwrap()
                         };
-                        let bytes = &data.to_be_bytes()[..size];
+                        let bytes = &data.to_le_bytes()[..size];
                         return Some(bytes.to_vec());
                     }
                     Scalar::Ptr(ptr) => match self.tcx.get_global_alloc(ptr.alloc_id) {
@@ -542,7 +616,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                     Operand::Move(place) | Operand::Copy(place) => place,
                     _ => unreachable!(),
                 };
-                return self.process_assignment(dst, src, caller_id, caller_id);
+                return self.process_assignment(dst, Some(src), caller_id, caller_id);
             }
 
             self.insert_var_defs(callee);
@@ -554,10 +628,10 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                         local: ret_local,
                         projection: self.tcx.intern_place_elems(&[]),
                     },
-                    &Place {
+                    Some(&Place {
                         local: RETURN_PLACE,
                         projection: self.tcx.intern_place_elems(&[]),
-                    },
+                    }),
                     caller_id,
                     callee_id,
                 );
@@ -645,6 +719,12 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                                 key,
                                 read_only: *read_only,
                             });
+                        } else {
+                            results.insert(ConflictField::Field {
+                                container: *container,
+                                key: Key::All,
+                                read_only: *read_only,
+                            });
                         }
                     } else {
                         results.insert(fact.clone());
@@ -708,7 +788,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                     Operand::Move(place) | Operand::Copy(place) => place,
                     _ => unreachable!(),
                 };
-                return self.process_assignment(dst, src, method_id, method_id);
+                return self.process_assignment(dst, Some(src), method_id, method_id);
             }
 
             let fn_name = KnownNames::get(self.tcx, callee.def_id);
@@ -968,7 +1048,10 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                                 Rvalue::Use(r_operand) => match r_operand {
                                     Operand::Move(r_place) | Operand::Copy(r_place) => {
                                         let flow_fn = self.process_assignment(
-                                            l_place, r_place, method_id, method_id,
+                                            l_place,
+                                            Some(r_place),
+                                            method_id,
+                                            method_id,
                                         );
                                         return Some(Either::Left(flow_fn));
                                     }
@@ -978,22 +1061,25 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                                                 l_place.clone(),
                                                 constant,
                                             )));
-                                        } else {
-                                            return None;
                                         }
                                     }
                                 },
                                 Rvalue::Ref(_, kind, r_place) => {
                                     if kind == &BorrowKind::Shared {
                                         let flow_fn = self.process_assignment(
-                                            l_place, r_place, method_id, method_id,
+                                            l_place,
+                                            Some(r_place),
+                                            method_id,
+                                            method_id,
                                         );
                                         return Some(Either::Left(flow_fn));
                                     }
                                 }
                                 _ => (),
-                            };
-                            None
+                            }
+                            Some(Either::Left(
+                                self.process_assignment(l_place, None, method_id, method_id),
+                            ))
                         } else {
                             None
                         }

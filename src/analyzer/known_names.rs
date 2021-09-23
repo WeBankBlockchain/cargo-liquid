@@ -37,8 +37,10 @@ pub enum KnownNames {
     LiquidStorageCollectionsMappingIsEmpty,
     LiquidStorageCollectionsVecInitialize,
     LiquidStorageCollectionsVecUse,
+    LiquidStorageCollectionsVecIterNext,
     LiquidStorageCollectionsIterableMappingInitialize,
     LiquidStorageCollectionsIterableMappingUse,
+    LiquidStorageCollectionsIterableMappingIterNext,
     LiquidEnvGetCaller,
     LiquidEnvGetOrigin,
     LiquidEnvNow,
@@ -262,7 +264,10 @@ impl KnownNames {
                                 "initialize" => KnownNames::LiquidStorageCollectionsVecInitialize,
                                 "len" | "is_empty" | "index" | "index_mut" | "get" | "get_mut"
                                 | "mutate_with" | "push" | "pop" | "swap" | "swap_remove"
-                                | "extend" => KnownNames::LiquidStorageCollectionsVecUse,
+                                | "extend" | "iter" => KnownNames::LiquidStorageCollectionsVecUse,
+                                "next" | "next_back" => {
+                                    KnownNames::LiquidStorageCollectionsVecIterNext
+                                }
                                 _ => KnownNames::None,
                             })
                             .unwrap_or(KnownNames::None)
@@ -287,8 +292,11 @@ impl KnownNames {
                                 }
                                 "len" | "is_empty" | "index" | "index_mut" | "get" | "get_mut"
                                 | "mutate_with" | "insert" | "remove" | "extend"
-                                | "contains_key" => {
+                                | "contains_key" | "iter" => {
                                     KnownNames::LiquidStorageCollectionsIterableMappingUse
+                                }
+                                "next" => {
+                                    KnownNames::LiquidStorageCollectionsIterableMappingIterNext
                                 }
                                 _ => KnownNames::None,
                             })

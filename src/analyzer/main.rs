@@ -62,13 +62,13 @@ fn main() {
 
             let result = rustc_driver::catch_fatal_errors(|| {
                 info!("analysis process started");
-                debug!("command provided for analysis: {:?}", args.join(" "));
 
                 let always_encode_mir = String::from("always-encode-mir");
                 if !args.iter().any(|arg| arg.ends_with(&always_encode_mir)) {
                     args.push("-Z".into());
                     args.push(always_encode_mir);
                 }
+                debug!("command provided for analysis: {:?}", args.join(" "));
 
                 let cfg_path = std::env::var("LIQUID_ANALYSIS_CFG_PATH")
                     .ok()
