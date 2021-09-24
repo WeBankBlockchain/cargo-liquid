@@ -4,10 +4,9 @@ mod pfg;
 pub(crate) mod utils;
 
 pub(crate) use builder::Builder;
-pub(crate) use cfg::{BackwardCFG, ForwardCFG, Method, MethodIndex};
+pub(crate) use cfg::{BackwardCFG, EdgeKind, ForwardCFG, Method, MethodIndex};
 pub(crate) use pfg::AndersonPFG;
-use std::fmt::Debug;
-use std::hash::Hash;
+use std::{fmt::Debug, hash::Hash};
 
 pub trait InterproceduralCFG {
     type Node: Eq + Hash + Clone + Debug;

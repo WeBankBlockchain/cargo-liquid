@@ -16,7 +16,7 @@ extern crate rustc_middle;
 
 use crate::{
     control_flow::{
-        utils, BackwardCFG, Builder, ForwardCFG, InterproceduralCFG, Method, MethodIndex,
+        utils, BackwardCFG, Builder, EdgeKind, ForwardCFG, InterproceduralCFG, Method, MethodIndex,
     },
     ifds::{problems::*, IfdsSolver},
     known_names::KnownNames,
@@ -325,13 +325,49 @@ impl AnalysisCallbacks {
         let mut ifds_solver = IfdsSolver::new(problem, &fwd_cfg, true);
         ifds_solver.solve();
 
+        let subgraph = fwd_cfg.graph.filter_map(
+            |node_idx, _| Some(fwd_cfg.graph.node_weight(node_idx).unwrap()),
+            |edge_idx, _| {
+                let edge_weight = fwd_cfg.graph.edge_weight(edge_idx).unwrap();
+                if edge_weight.kind == EdgeKind::Return {
+                    None
+                } else {
+                    // Removes all `Return` edges, because theses edges can introduce unexpected child nodes when
+                    // doing DFS traversing for detecting  in constructor. For example:
+                    //
+                    // new       method_never_called_by_new
+                    //  |  Call       Call  |
+                    //  |----->callee<------|
+                    //  |         |         |
+                    //  |  Return | Return  |
+                    //  |<--------|-------->|
+                    //
+                    // In such a situation, when traversing from start point of `new`, the nodes in `method_never_called_by_new`
+                    // can be visited via the `Return` edge from `callee` to `method_never_called_by_new`, but actually this
+                    // execution path is illegal, so the analysis will be trapped.
+                    //
+                    // After removing all `Return` edges, the legal child nodes can also be visited via `Call` edges and
+                    // `CallToReturn` edges, hence the removing process has no impact on correctness of uninitialized
+                    // state variables detecting.
+                    Some(edge_weight)
+                }
+            },
+        );
+
         let constructor = fwd_cfg.get_method_by_index(constructor);
         let start_points = fwd_cfg.get_start_points_of(constructor);
         assert!(start_points.len() == 1);
-        let mut dfs = Dfs::new(&fwd_cfg.graph, fwd_cfg.node_to_index[start_points[0]]);
+
+        // The `subgraph` has the structure of a subgraph of the original graph after removing all `Return` edges.
+        // Petgraph guarantees that ff no nodes are removed, the resulting graph has compatible node indices.
+        //
+        // ## NOTICE
+        // The above invariant is kept in petgraph of version 0.6. If upgrade version of petgraph in future, please
+        // check this invariant again.
+        let mut dfs = Dfs::new(&subgraph, fwd_cfg.node_to_index[start_points[0]]);
         let session = compiler.session();
 
-        while let Some(node_index) = dfs.next(&fwd_cfg.graph) {
+        while let Some(node_index) = dfs.next(&subgraph) {
             let node = fwd_cfg.graph.node_weight(node_index).unwrap();
             if fwd_cfg.is_call(node) {
                 let belongs_to = node.belongs_to;
@@ -362,7 +398,9 @@ impl AnalysisCallbacks {
                                 | KnownNames::LiquidStorageValueMutateWith
                                 | KnownNames::LiquidStorageValueSet
                                 | KnownNames::LiquidStorageCollectionsVecUse
-                                | KnownNames::LiquidStorageCollectionsIterableMappingUse,
+                                | KnownNames::LiquidStorageCollectionsVecIterNext
+                                | KnownNames::LiquidStorageCollectionsIterableMappingUse
+                                | KnownNames::LiquidStorageCollectionsIterableMappingIterNext
                         ) {
                             let results = ifds_solver.get_results_at(node);
                             let indices = results
