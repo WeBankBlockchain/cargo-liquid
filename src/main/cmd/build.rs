@@ -351,17 +351,9 @@ fn calc_selector(source: &[u8], use_gm: bool) -> String {
         hash_result[1],
         hash_result[2],
         hash_result[3],
-    ]);
+    ]) as i32;
 
-    // The length of LEB128-encoded a 32-bit unsigned integer is at most 5.
-    let mut leb128_buffer = [0u8; 5];
-
-    let size = {
-        let mut writer = &mut leb128_buffer[..];
-        leb128::write::signed(&mut writer, (selector as i32) as i64).unwrap()
-    };
-
-    unsafe { String::from_utf8_unchecked(leb128_buffer[..size].to_vec()) }
+    format!("i32.const {}", selector)
 }
 
 fn generate_abi(
@@ -405,10 +397,6 @@ fn generate_abi(
             .status()
             .context(format!("Error executing `{:?}`", cmd))?;
         if status.success() {
-            let dest_wasm = &crate_meta.dest_wasm;
-            let mut wasm_content =
-                unsafe { String::from_utf8_unchecked(fs::read(dest_wasm).unwrap()) };
-
             let dest_abi = &crate_meta.dest_abi;
             let abi_content = fs::read_to_string(dest_abi)?;
             let abi: Map<String, Value> = serde_json::from_str(&abi_content)?;
@@ -445,18 +433,12 @@ fn generate_abi(
                 }
             }
 
+            let dest_wasm = &crate_meta.dest_wasm;
+            let mut wasm_content = wabt::wasm2wat(fs::read(dest_wasm).unwrap()).unwrap();
+
             for (scope, replacements) in sel_replacements {
                 for (fn_name, (old_sel, new_sel)) in replacements {
                     let match_indices = wasm_content.match_indices(&old_sel).collect::<Vec<_>>();
-                    let err_msg = format!(
-                        "method `{}` in `{}` cannot be invoked correctly, please rename this method",
-                        fn_name,
-                        if scope == LOCAL_SCOPE {
-                            "contract"
-                        } else {
-                            &scope
-                        }
-                    );
 
                     // It's legal that length of match_indices <= 1. For example, if an interface contains
                     // a method but the method is never used, then this method will be optimized out
@@ -466,39 +448,26 @@ fn generate_abi(
                     // For now, we can't handle the situation that the method is optimized out but in
                     // rest of bytecode there is another occurrence with same sequence of bytes.
                     if match_indices.len() > 1 {
+                        let err_msg = format!(
+                            "method `{}` in `{}` cannot be invoked correctly, please rename this method",
+                            fn_name,
+                            if scope == LOCAL_SCOPE {
+                                "contract"
+                            } else {
+                                &scope
+                            }
+                        );
                         anyhow::bail!(err_msg);
                     }
 
                     if match_indices.len() == 1 {
-                        let match_pos = match_indices[0].0;
-                        assert!(
-                            match_pos != 0,
-                            "legal Wasm bytecode should start with [0, 'a', 's', 'm']"
-                        );
-
-                        // In Wasm, representation of `i32.const` instruction is 0x41.
-                        if wasm_content.as_bytes()[match_pos - 1] != 0x41 {
-                            anyhow::bail!(err_msg);
-                        }
                         wasm_content = wasm_content.replace(&old_sel, &new_sel);
 
                         #[cfg(debug_assertions)]
                         {
-                            let bytes_to_hex = |str: &String| {
-                                let mut s = String::with_capacity(str.len() * 2);
-                                use std::fmt::Write;
-                                for byte in str.as_bytes() {
-                                    let _ = write!(s, "{:02x}", byte);
-                                }
-                                s
-                            };
-
                             eprintln!(
                                 "rewrite selector for {}::{}: {} -> {}",
-                                scope,
-                                fn_name,
-                                bytes_to_hex(&old_sel),
-                                bytes_to_hex(&new_sel)
+                                scope, fn_name, old_sel, new_sel,
                             );
                         }
                     }
@@ -506,7 +475,7 @@ fn generate_abi(
             }
 
             let mut wasm_file = fs::File::create(dest_wasm)?;
-            wasm_file.write_all(wasm_content.as_bytes())?;
+            wasm_file.write_all(&wabt::wat2wasm(wasm_content).unwrap())?;
 
             let local_abi = abi.get("$local").unwrap();
             let mut abi_file = fs::File::create(dest_abi)?;
@@ -596,13 +565,19 @@ pub(crate) fn execute_build(
         }
     }
 
+    let mut dest_wasm = crate_metadata.dest_wasm.display().to_string();
+    let mut dest_abi = crate_metadata.dest_abi.display().to_string();
+    if cfg!(target_os = "windows") {
+        dest_wasm = dest_wasm.replace("\\", "\\\\");
+        dest_abi = dest_abi.replace("\\", "\\\\");
+    }
     Ok(format!(
         "\n{}Done in {}, your project is ready now:\n{: >6}: {}\n{: >6}: {}",
         SPARKLE,
         HumanDuration(started.elapsed()),
         "Binary".green().bold(),
-        crate_metadata.dest_wasm.display().to_string().bold(),
+        dest_wasm.bold(),
         "ABI".green().bold(),
-        crate_metadata.dest_abi.display().to_string().bold(),
+        dest_abi.bold(),
     ))
 }

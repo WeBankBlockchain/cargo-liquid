@@ -32,6 +32,7 @@ itertools = "*"
 leb128 = "*"
 tiny-keccak = { version = "*", features = ["keccak"] }
 libsm = "*"
+wabt = "*"
 
 [build-dependencies]
 anyhow = "1.0.32"
