@@ -401,7 +401,7 @@ fn generate_abi(
             let abi_content = fs::read_to_string(dest_abi)?;
             let abi: Map<String, Value> = serde_json::from_str(&abi_content)?;
 
-            let mut sel_replacements: HashMap<String, HashMap<String, _>> = HashMap::new();
+            let mut sel_replacements: HashMap<String, HashMap<String, _, _>> = HashMap::new();
             for (scope, fns) in &abi {
                 let is_iface = scope != LOCAL_SCOPE;
                 let fns = fns.as_array().unwrap();
@@ -428,7 +428,7 @@ fn generate_abi(
                             .entry(scope.to_owned())
                             .or_insert(HashMap::new());
                         assert!(!entry.contains_key(&fn_name));
-                        entry.insert(fn_name, (old_sel, new_sel));
+                        entry.insert(fn_name, (old_sel, new_sel, is_iface));
                     }
                 }
             }
@@ -437,7 +437,7 @@ fn generate_abi(
             let mut wasm_content = wabt::wasm2wat(fs::read(dest_wasm).unwrap()).unwrap();
 
             for (scope, replacements) in sel_replacements {
-                for (fn_name, (old_sel, new_sel)) in replacements {
+                for (fn_name, (old_sel, new_sel, is_iface)) in replacements {
                     let match_indices = wasm_content.match_indices(&old_sel).collect::<Vec<_>>();
 
                     // It's legal that length of match_indices <= 1. For example, if an interface contains
@@ -449,7 +449,7 @@ fn generate_abi(
                     // rest of bytecode there is another occurrence with same sequence of bytes.
                     if match_indices.len() > 1 {
                         let err_msg = format!(
-                            "method `{}` in `{}` cannot be invoked correctly, please rename this method",
+                            "method `{}` in {} cannot be invoked correctly, please rename this method",
                             fn_name,
                             if scope == LOCAL_SCOPE {
                                 "contract"
@@ -469,6 +469,14 @@ fn generate_abi(
                                 "rewrite selector for {}::{}: {} -> {}",
                                 scope, fn_name, old_sel, new_sel,
                             );
+                        }
+                    } else {
+                        if !is_iface {
+                            let err_msg = format!(
+                                "unable to find selector for method `{}` in contract",
+                                fn_name,
+                            );
+                            anyhow::bail!(err_msg);
                         }
                     }
                 }
