@@ -147,6 +147,15 @@ enum Command {
         #[structopt(short, long)]
         dump_cfg: Option<PathBuf>,
     },
+
+    ///Rename the project , you need to update name in the cargo-liquid dir and promise the project exits in that.
+    #[structopt(name = "rename")]
+    Rename {
+        //The project old name
+        old_name: String,
+        //The project new name
+        new_name: String,
+    },
 }
 
 fn main() {
@@ -181,5 +190,6 @@ fn exec(cmd: Command) -> Result<String> {
             analysis_flags.try_into()?,
             dump_cfg,
         ),
+        Command::Rename { old_name, new_name } => cmd::execute_rename(old_name, new_name),
     }
 }

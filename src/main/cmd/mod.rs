@@ -12,5 +12,6 @@
 
 mod build;
 mod new;
+mod rename;
 
-pub(crate) use self::{build::execute_build, new::execute_new};
+pub(crate) use self::{build::execute_build, new::execute_new, rename::execute_rename};
