@@ -113,7 +113,7 @@ mod env_info_kind {
     /// `3` represents height of current block.
     pub const BLOCK_NUMBER: Type = 3;
     /// `4` represents self address of current contract.
-    pub const ADDR: Type = 3;
+    pub const ADDR: Type = 4;
 }
 
 impl AnalysisCallbacks {
