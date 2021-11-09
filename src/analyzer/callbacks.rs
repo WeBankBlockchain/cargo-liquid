@@ -333,7 +333,7 @@ impl AnalysisCallbacks {
                     None
                 } else {
                     // Removes all `Return` edges, because theses edges can introduce unexpected child nodes when
-                    // doing DFS traversing for detecting  in constructor. For example:
+                    // doing DFS traversing for detecting in constructor. For example:
                     //
                     // new       method_never_called_by_new
                     //  |  Call       Call  |
@@ -359,7 +359,7 @@ impl AnalysisCallbacks {
         assert!(start_points.len() == 1);
 
         // The `subgraph` has the structure of a subgraph of the original graph after removing all `Return` edges.
-        // Petgraph guarantees that ff no nodes are removed, the resulting graph has compatible node indices.
+        // Petgraph guarantees that no nodes are removed, the resulting graph has compatible node indices.
         //
         // ## NOTICE
         // The above invariant is kept in petgraph of version 0.6. If upgrade version of petgraph in future, please
