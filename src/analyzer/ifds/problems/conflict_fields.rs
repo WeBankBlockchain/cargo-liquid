@@ -887,9 +887,6 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                             | KnownNames::LiquidStorageValueGetMut
                             | KnownNames::LiquidStorageValueMutateWith
                             | KnownNames::LiquidStorageValueSet
-                            | KnownNames::LiquidStorageCollectionsMappingExtend
-                            | KnownNames::LiquidStorageCollectionsVecUse
-                            | KnownNames::LiquidStorageCollectionsIterableMappingUse
                     ) {
                         let this = &args[0];
                         let read_only = match this.ty(local_decls, self.tcx).kind() {
@@ -968,6 +965,35 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                         KnownNames::LiquidStorageCollectionsMappingInsert
                             | KnownNames::LiquidStorageCollectionsMappingRemove
                     ) {
+                        if let Operand::Constant(box constant) = &args[1] {
+                            let key = if let Some(constant) = self.resolve_const(constant) {
+                                Key::Const(constant)
+                            } else {
+                                Key::All
+                            };
+
+                            return Box::new(move |fact| {
+                                if fact == &ConflictField::Zero {
+                                    let mut results = HashSet::new();
+                                    for container in &states {
+                                        results.insert(ConflictField::Field {
+                                            container: *container,
+                                            key: key.clone(),
+                                            read_only: false,
+                                        });
+                                        results.insert(ConflictField::Field {
+                                            container: *container,
+                                            key: Key::Len,
+                                            read_only: false,
+                                        });
+                                    }
+                                    results
+                                } else {
+                                    HashSet::from_iter([fact.clone()])
+                                }
+                            });
+                        }
+
                         let key_local = match &args[1] {
                             Operand::Copy(place) | Operand::Move(place) => place.local,
                             _ => unreachable!(),
@@ -1007,10 +1033,35 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                         });
                     }
 
+                    if matches!(fn_name, KnownNames::LiquidStorageCollectionsMappingExtend) {
+                        return Box::new(move |fact| {
+                            if fact == &ConflictField::Zero {
+                                let mut results = HashSet::new();
+                                for container in &states {
+                                    results.insert(ConflictField::Field {
+                                        container: *container,
+                                        key: Key::All,
+                                        read_only: false,
+                                    });
+                                    results.insert(ConflictField::Field {
+                                        container: *container,
+                                        key: Key::Len,
+                                        read_only: false,
+                                    });
+                                }
+                                results
+                            } else {
+                                HashSet::from_iter([fact.clone()])
+                            }
+                        });
+                    }
+
                     if matches!(
                         fn_name,
                         KnownNames::LiquidStorageCollectionsMappingLen
                             | KnownNames::LiquidStorageCollectionsMappingIsEmpty
+                            | KnownNames::LiquidStorageCollectionsVecUse
+                            | KnownNames::LiquidStorageCollectionsIterableMappingUse
                     ) {
                         return Box::new(move |fact| {
                             if fact == &ConflictField::Zero {
