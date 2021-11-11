@@ -257,6 +257,11 @@ impl AnalysisCallbacks {
             conflict_fields.dedup();
             let mut composed_conflict_fields: Vec<FieldDesc> = vec![];
             let mut add_to_composed = |field_to_add: FieldDesc| {
+                if field_to_add.kind == field_kind::LEN {
+                    composed_conflict_fields.push(field_to_add);
+                    return;
+                }
+
                 if composed_conflict_fields
                     .iter()
                     .rposition(|field| {

@@ -1070,7 +1070,9 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                                     results.insert(ConflictField::Field {
                                         container: *container,
                                         key: Key::Len,
-                                        read_only: true,
+                                        read_only: matches!(fn_name,
+                                            KnownNames::LiquidStorageCollectionsMappingLen
+                                            | KnownNames::LiquidStorageCollectionsMappingIsEmpty),
                                     });
                                 }
                                 results
