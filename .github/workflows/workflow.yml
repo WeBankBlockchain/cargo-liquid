@@ -1,0 +1,33 @@
+name: Cargo-liquid Github Actions
+on: 
+  push:
+  pull_request:
+  release:
+    types: [published, created, edited]
+
+jobs:
+  win_test:
+    name: win_test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-2019]
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 5
+      - name: install rust nightly
+        uses: actions-rs/toolchain@v1
+        with:
+          components: rustc-dev, rust-src
+      - name: install cargo-liquid
+        run: cargo install --path . --force
+      - name: compile test contract
+        run: cd .\tests\conflict_analysis_test\contract && cargo liquid build
+      - name: setup python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+          architecture: 'x64'
+      - name: verify conflict analysis result
+        run: cd .\tests\conflict_analysis_test && python .\verify_conflict.py
