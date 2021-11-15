@@ -39,6 +39,7 @@ struct CrateMetadata {
     original_wasm: PathBuf,
     dest_wasm: PathBuf,
     dest_abi: PathBuf,
+    is_collaboration: bool,
 }
 
 impl CrateMetadata {
@@ -79,6 +80,16 @@ fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata>
     let mut dest_abi = dest_wasm.clone();
     dest_abi.set_extension("abi");
 
+    let lang_dep = root_package
+        .dependencies
+        .iter()
+        .find(|dep| dep.name == "liquid_lang")
+        .expect("liquid project must depend `liquid_lang` crate");
+    let lang_features = &lang_dep.features;
+    let is_collaboration = lang_features
+        .iter()
+        .any(|feature| feature == "collaboration");
+
     let crate_metadata = CrateMetadata {
         cargo_meta: metadata,
         root_package,
@@ -86,6 +97,7 @@ fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata>
         original_wasm,
         dest_wasm,
         dest_abi,
+        is_collaboration,
     };
 
     Ok(crate_metadata)
@@ -95,11 +107,15 @@ fn run_xargo_build(
     crate_metadata: &CrateMetadata,
     use_gm: bool,
     verbosity_behavior: VerbosityBehavior,
-    skip_analysis: bool,
+    mut skip_analysis: bool,
 ) -> Result<String> {
     utils::check_channel()?;
 
     let xbuild = |manifest_path: &ManifestPath| {
+        if crate_metadata.is_collaboration {
+            skip_analysis = true;
+        }
+
         let manifest_dir = manifest_path.as_ref().parent().unwrap();
         if !skip_analysis {
             env::set_var("LIQUID_ANALYSIS_TARGET_DIR", manifest_dir);
