@@ -47,6 +47,7 @@ pub enum KnownNames {
     LiquidEnvGetAddress,
     LiquidEnvGetBlockNumber,
     LiquidEnvCall,
+    LiquidEnvEmit,
     None,
 }
 
@@ -174,6 +175,7 @@ impl KnownNames {
         Self::get_def_data_path_elem_name(path_iter.next())
             .map(|n| match n.as_str().deref() {
                 "call" => KnownNames::LiquidEnvCall,
+                "emit" => KnownNames::LiquidEnvEmit,
                 _ => KnownNames::None,
             })
             .unwrap_or(KnownNames::None)

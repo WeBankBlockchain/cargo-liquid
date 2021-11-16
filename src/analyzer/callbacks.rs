@@ -113,7 +113,7 @@ mod env_info_kind {
     /// `3` represents height of current block.
     pub const BLOCK_NUMBER: Type = 3;
     /// `4` represents self address of current contract.
-    pub const ADDR: Type = 3;
+    pub const ADDR: Type = 4;
 }
 
 impl AnalysisCallbacks {
@@ -257,6 +257,11 @@ impl AnalysisCallbacks {
             conflict_fields.dedup();
             let mut composed_conflict_fields: Vec<FieldDesc> = vec![];
             let mut add_to_composed = |field_to_add: FieldDesc| {
+                if field_to_add.kind == field_kind::LEN {
+                    composed_conflict_fields.push(field_to_add);
+                    return;
+                }
+
                 if composed_conflict_fields
                     .iter()
                     .rposition(|field| {
@@ -333,7 +338,7 @@ impl AnalysisCallbacks {
                     None
                 } else {
                     // Removes all `Return` edges, because theses edges can introduce unexpected child nodes when
-                    // doing DFS traversing for detecting  in constructor. For example:
+                    // doing DFS traversing for detecting in constructor. For example:
                     //
                     // new       method_never_called_by_new
                     //  |  Call       Call  |
@@ -359,7 +364,7 @@ impl AnalysisCallbacks {
         assert!(start_points.len() == 1);
 
         // The `subgraph` has the structure of a subgraph of the original graph after removing all `Return` edges.
-        // Petgraph guarantees that ff no nodes are removed, the resulting graph has compatible node indices.
+        // Petgraph guarantees that no nodes are removed, the resulting graph has compatible node indices.
         //
         // ## NOTICE
         // The above invariant is kept in petgraph of version 0.6. If upgrade version of petgraph in future, please
