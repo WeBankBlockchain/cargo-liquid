@@ -86,6 +86,7 @@ fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata>
         .find(|dep| dep.name == "liquid_lang")
         .expect("liquid project must depend `liquid_lang` crate");
     let lang_features = &lang_dep.features;
+
     let is_collaboration = lang_features
         .iter()
         .any(|feature| feature == "collaboration");
@@ -107,15 +108,11 @@ fn run_xargo_build(
     crate_metadata: &CrateMetadata,
     use_gm: bool,
     verbosity_behavior: VerbosityBehavior,
-    mut skip_analysis: bool,
+    skip_analysis: bool,
 ) -> Result<String> {
     utils::check_channel()?;
 
     let xbuild = |manifest_path: &ManifestPath| {
-        if crate_metadata.is_collaboration {
-            skip_analysis = true;
-        }
-
         let manifest_dir = manifest_path.as_ref().parent().unwrap();
         if !skip_analysis {
             env::set_var("LIQUID_ANALYSIS_TARGET_DIR", manifest_dir);
@@ -197,40 +194,41 @@ fn build_cargo_project(
     }
 
     let mut old_wrapper = Err(env::VarError::NotPresent);
-    let skip_analysis = if analysis_behavior != AnalysisBehavior::Skip {
-        // Sets `RUSTC_WRAPPER` environment variable for current process, which leads
-        // cargo to invoke liquid-analy as compiler, and liquid-analy can then obtain
-        // full list of command line arguments of the invocation above.
-        //
-        // ## Why not use `RUSTC`?
-        // Due to that we use unstable version of rustc, and features supported by
-        // the compiler is inconstant, using compilers of different version to test
-        // this project is significant. Via setting different `RUSTC` value we can
-        // achieve this aim easily. But if we use `RUSTC` directly here, then it
-        // becomes difficult to decide which version of rustc to use in liquid-analy.
-        old_wrapper = env::var(RUSTC_WRAPPER_ENV_VAR);
-        env::set_var(RUSTC_WRAPPER_ENV_VAR, "liquid-analy");
+    let skip_analysis =
+        if analysis_behavior != AnalysisBehavior::Skip && !crate_metadata.is_collaboration {
+            // Sets `RUSTC_WRAPPER` environment variable for current process, which leads
+            // cargo to invoke liquid-analy as compiler, and liquid-analy can then obtain
+            // full list of command line arguments of the invocation above.
+            //
+            // ## Why not use `RUSTC`?
+            // Due to that we use unstable version of rustc, and features supported by
+            // the compiler is inconstant, using compilers of different version to test
+            // this project is significant. Via setting different `RUSTC` value we can
+            // achieve this aim easily. But if we use `RUSTC` directly here, then it
+            // becomes difficult to decide which version of rustc to use in liquid-analy.
+            old_wrapper = env::var(RUSTC_WRAPPER_ENV_VAR);
+            env::set_var(RUSTC_WRAPPER_ENV_VAR, "liquid-analy");
 
-        // The `LIQUID_ANALYSIS_PROJECT` environment variable is used to tell
-        // liquid-analy the project it needs to care about.
-        env::set_var(
-            "LIQUID_ANALYSIS_PROJECT",
-            crate_metadata.package_name.clone(),
-        );
+            // The `LIQUID_ANALYSIS_PROJECT` environment variable is used to tell
+            // liquid-analy the project it needs to care about.
+            env::set_var(
+                "LIQUID_ANALYSIS_PROJECT",
+                crate_metadata.package_name.clone(),
+            );
 
-        if let Some(cfg_path) = cfg_path {
-            let abs_path = if cfg_path.is_absolute() {
-                cfg_path.to_path_buf()
-            } else {
-                let cur_dir = env::current_dir()?;
-                cur_dir.join(cfg_path)
-            };
-            env::set_var("LIQUID_ANALYSIS_CFG_PATH", abs_path);
-        }
-        false
-    } else {
-        true
-    };
+            if let Some(cfg_path) = cfg_path {
+                let abs_path = if cfg_path.is_absolute() {
+                    cfg_path.to_path_buf()
+                } else {
+                    let cur_dir = env::current_dir()?;
+                    cur_dir.join(cfg_path)
+                };
+                env::set_var("LIQUID_ANALYSIS_CFG_PATH", abs_path);
+            }
+            false
+        } else {
+            true
+        };
 
     let build_result = run_xargo_build(crate_metadata, use_gm, verbosity_behavior, skip_analysis);
 
@@ -413,98 +411,101 @@ fn generate_abi(
             .status()
             .context(format!("Error executing `{:?}`", cmd))?;
         if status.success() {
-            let dest_abi = &crate_meta.dest_abi;
-            let abi_content = fs::read_to_string(dest_abi)?;
-            let abi: Map<String, Value> = serde_json::from_str(&abi_content)?;
+            if !crate_meta.is_collaboration {
+                let dest_abi = &crate_meta.dest_abi;
+                let abi_content = fs::read_to_string(dest_abi)?;
+                let abi: Map<String, Value> = serde_json::from_str(&abi_content)?;
 
-            let mut sel_replacements: HashMap<String, HashMap<String, _, _>> = HashMap::new();
-            for (scope, fns) in &abi {
-                let is_iface = scope != LOCAL_SCOPE;
-                let fns = fns.as_array().unwrap();
-                for f in fns {
-                    let fn_info = f.as_object().unwrap();
-                    let ty = fn_info.get("type").unwrap().as_str().unwrap();
-                    if ty == "function" {
-                        let fn_name = fn_info.get("name").unwrap().as_str().unwrap().to_string();
-                        let inputs = fn_info.get("inputs").unwrap().as_array().unwrap();
-                        let sig = inputs
-                            .iter()
-                            .map(|input| parse_ty(input.as_object().unwrap()))
-                            .join(",");
-                        let sig = format!("{}({})", fn_name, sig);
-                        let new_sel = calc_selector(sig.as_bytes(), use_gm);
+                let mut sel_replacements: HashMap<String, HashMap<String, _, _>> = HashMap::new();
+                for (scope, fns) in &abi {
+                    let is_iface = scope != LOCAL_SCOPE;
+                    let fns = fns.as_array().unwrap();
+                    for f in fns {
+                        let fn_info = f.as_object().unwrap();
+                        let ty = fn_info.get("type").unwrap().as_str().unwrap();
+                        if ty == "function" {
+                            let fn_name =
+                                fn_info.get("name").unwrap().as_str().unwrap().to_string();
+                            let inputs = fn_info.get("inputs").unwrap().as_array().unwrap();
+                            let sig = inputs
+                                .iter()
+                                .map(|input| parse_ty(input.as_object().unwrap()))
+                                .join(",");
+                            let sig = format!("{}({})", fn_name, sig);
+                            let new_sel = calc_selector(sig.as_bytes(), use_gm);
 
-                        let old_sel = if is_iface {
-                            calc_selector((scope.to_owned() + &fn_name).as_bytes(), use_gm)
-                        } else {
-                            calc_selector(fn_name.as_bytes(), use_gm)
-                        };
+                            let old_sel = if is_iface {
+                                calc_selector((scope.to_owned() + &fn_name).as_bytes(), use_gm)
+                            } else {
+                                calc_selector(fn_name.as_bytes(), use_gm)
+                            };
 
-                        let entry = sel_replacements
-                            .entry(scope.to_owned())
-                            .or_insert(HashMap::new());
-                        assert!(!entry.contains_key(&fn_name));
-                        entry.insert(fn_name, (old_sel, new_sel, is_iface));
+                            let entry = sel_replacements
+                                .entry(scope.to_owned())
+                                .or_insert(HashMap::new());
+                            assert!(!entry.contains_key(&fn_name));
+                            entry.insert(fn_name, (old_sel, new_sel, is_iface));
+                        }
                     }
                 }
-            }
 
-            let dest_wasm = &crate_meta.dest_wasm;
-            let mut wasm_content = wabt::wasm2wat(fs::read(dest_wasm).unwrap()).unwrap();
+                let dest_wasm = &crate_meta.dest_wasm;
+                let mut wasm_content = wabt::wasm2wat(fs::read(dest_wasm).unwrap()).unwrap();
 
-            for (scope, replacements) in sel_replacements {
-                for (fn_name, (old_sel, new_sel, is_iface)) in replacements {
-                    let match_indices = wasm_content.match_indices(&old_sel).collect::<Vec<_>>();
+                for (scope, replacements) in sel_replacements {
+                    for (fn_name, (old_sel, new_sel, is_iface)) in replacements {
+                        let match_indices =
+                            wasm_content.match_indices(&old_sel).collect::<Vec<_>>();
 
-                    // It's legal that length of match_indices <= 1. For example, if an interface contains
-                    // a method but the method is never used, then this method will be optimized out
-                    // in optimization phase, which causes `match_indices` is empty.
-                    //
-                    // ## Caution
-                    // For now, we can't handle the situation that the method is optimized out but in
-                    // rest of bytecode there is another occurrence with same sequence of bytes.
-                    if match_indices.len() > 1 {
-                        let err_msg = format!(
-                            "method `{}` in {} cannot be invoked correctly, please rename this method",
-                            fn_name,
-                            if scope == LOCAL_SCOPE {
-                                "contract"
-                            } else {
-                                &scope
-                            }
-                        );
-                        anyhow::bail!(err_msg);
-                    }
-
-                    if match_indices.len() == 1 {
-                        wasm_content = wasm_content.replace(&old_sel, &new_sel);
-
-                        #[cfg(debug_assertions)]
-                        {
-                            eprintln!(
-                                "rewrite selector for {}::{}: {} -> {}",
-                                scope, fn_name, old_sel, new_sel,
-                            );
-                        }
-                    } else {
-                        if !is_iface {
+                        // It's legal that length of match_indices <= 1. For example, if an interface contains
+                        // a method but the method is never used, then this method will be optimized out
+                        // in optimization phase, which causes `match_indices` is empty.
+                        //
+                        // ## Caution
+                        // For now, we can't handle the situation that the method is optimized out but in
+                        // rest of bytecode there is another occurrence with same sequence of bytes.
+                        if match_indices.len() > 1 {
                             let err_msg = format!(
-                                "unable to find selector for method `{}` in contract",
+                                "method `{}` in {} cannot be invoked correctly, please rename this method",
                                 fn_name,
+                                if scope == LOCAL_SCOPE {
+                                    "contract"
+                                } else {
+                                    &scope
+                                }
                             );
                             anyhow::bail!(err_msg);
                         }
+
+                        if match_indices.len() == 1 {
+                            wasm_content = wasm_content.replace(&old_sel, &new_sel);
+
+                            #[cfg(debug_assertions)]
+                            {
+                                eprintln!(
+                                    "rewrite selector for {}::{}: {} -> {}",
+                                    scope, fn_name, old_sel, new_sel,
+                                );
+                            }
+                        } else {
+                            if !is_iface {
+                                let err_msg = format!(
+                                    "unable to find selector for method `{}` in contract",
+                                    fn_name,
+                                );
+                                anyhow::bail!(err_msg);
+                            }
+                        }
                     }
                 }
+
+                let mut wasm_file = fs::File::create(dest_wasm)?;
+                wasm_file.write_all(&wabt::wat2wasm(wasm_content).unwrap())?;
+
+                let local_abi = abi.get("$local").unwrap();
+                let mut abi_file = fs::File::create(dest_abi)?;
+                abi_file.write_all(serde_json::to_string(local_abi)?.as_bytes())?;
             }
-
-            let mut wasm_file = fs::File::create(dest_wasm)?;
-            wasm_file.write_all(&wabt::wat2wasm(wasm_content).unwrap())?;
-
-            let local_abi = abi.get("$local").unwrap();
-            let mut abi_file = fs::File::create(dest_abi)?;
-            abi_file.write_all(serde_json::to_string(local_abi)?.as_bytes())?;
-
             Ok(())
         } else {
             anyhow::bail!("`{:?}` failed with exit code: {:?}", cmd, status.code())
@@ -556,7 +557,7 @@ pub(crate) fn execute_build(
     println!("[4/4] {} Generating ABI file", PAPER);
     generate_abi(&crate_metadata, verbosity_behavior, use_gm)?;
 
-    if analysis_behavior != AnalysisBehavior::Skip {
+    if analysis_behavior != AnalysisBehavior::Skip && !crate_metadata.is_collaboration {
         if let Ok(cfa_result) = serde_json::from_str::<'_, Value>(&build_result) {
             let cfa_result = cfa_result.as_object().unwrap();
             let abi_content = fs::read_to_string(&crate_metadata.dest_abi).unwrap();

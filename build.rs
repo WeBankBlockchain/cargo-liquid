@@ -58,7 +58,7 @@ fn zip_dir(src_dir: &Path, dst_file: &Path) -> Result<()> {
     }
 
     if !src_dir.is_dir() {
-        anyhow::bail!("src_dir `{}` is not a directory");
+        anyhow::bail!("src_dir `{}` is not a directory", src_dir.display());
     }
 
     let file = File::create(dst_file)?;
