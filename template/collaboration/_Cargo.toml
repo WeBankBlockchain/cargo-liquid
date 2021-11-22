@@ -13,7 +13,7 @@ spin = "0.7.0"
 liquid_lang = { version = "1.0.0-rc2", git = "https://github.com/WeBankBlockchain/liquid", branch = "dev", package = "liquid_lang", default-features = false, features = ["collaboration"] }
 liquid_primitives = { version = "1.0.0-rc2", git = "https://github.com/WeBankBlockchain/liquid", branch = "dev", package = "liquid_primitives", default-features = false }
 liquid_prelude = { version = "1.0.0-rc2", git = "https://github.com/WeBankBlockchain/liquid", branch = "dev", package = "liquid_prelude", default-features = false }
-liquid_macro = { version = "1.0.0-rc2", git = "https://github.com/WeBankBlockchain/liquid", branch = "dev", package = "liquid_macro", default-features = false }
+liquid_macro = { version = "1.0.0-rc2", git = "https://github.com/WeBankBlockchain/liquid", branch = "dev", package = "liquid_macro", default-features = false, features = ["collaboration"] }
 liquid_abi_gen = { version = "1.0.0-rc2", git = "https://github.com/WeBankBlockchain/liquid", branch = "dev", package = "liquid_abi_gen", default-features = false, optional = true }
 
 [dev-dependencies]
@@ -36,7 +36,6 @@ std = [
     "liquid_primitives/std",
     "liquid_prelude/std",
     "liquid_macro/std",
-    "liquid_ty_mapping/std",
 ]
 liquid-abi-gen = [
     "std",
