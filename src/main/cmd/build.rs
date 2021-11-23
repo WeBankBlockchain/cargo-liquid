@@ -163,7 +163,7 @@ fn run_xargo_build(
         .with_root_package_manifest(|manifest| {
             manifest
                 .with_removed_crate_type("rlib")?
-                .with_profile_release_lto(true)?;
+                .with_profile_release_lto(false)?;
             Ok(())
         })?
         .using_temp(xbuild)
@@ -516,7 +516,7 @@ fn generate_abi(
         .with_root_package_manifest(|manifest| {
             manifest
                 .with_added_crate_type("rlib")?
-                .with_profile_release_lto(true)?;
+                .with_profile_release_lto(false)?;
             Ok(())
         })?
         .using_temp(build)?;
