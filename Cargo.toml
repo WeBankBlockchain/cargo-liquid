@@ -1,6 +1,6 @@
 [package]
 name = "cargo-liquid"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 authors = ["vita-dounai <lichenxi.webank@gmail.com>"]
 build = "build.rs"
 edition = "2018"
@@ -20,9 +20,29 @@ parity-wasm = "0.41.0"
 pwasm-utils = "0.14.0"
 which = "4.0.2"
 indicatif = { version = "0.15.0", features = ["rayon", "improved_unicode"] }
-console = { version = "0.13.0" }
+console = "0.13.0"
+env_logger = "*"
+log = "*"
+log-derive = "*"
+petgraph = "0.6"
+either = "*"
+serde = "*"
+serde_json = "*"
+itertools = "*"
+leb128 = "*"
+tiny-keccak = { version = "*", features = ["keccak"] }
+libsm = "*"
+wabt = "*"
 
 [build-dependencies]
 anyhow = "1.0.32"
 zip = "0.5.6"
 walkdir = "2.3.1"
+
+[[bin]]
+name = "cargo-liquid"
+path = "src/main/main.rs"
+
+[[bin]]
+name = "liquid-analy"
+path = "src/analyzer/main.rs"

@@ -16,7 +16,7 @@ use std::{
     ffi::OsStr,
     fs::File,
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use walkdir::WalkDir;
 use zip::{write::FileOptions, CompressionMethod, ZipWriter};
@@ -52,13 +52,13 @@ fn main() {
     });
 }
 
-fn zip_dir(src_dir: &PathBuf, dst_file: &PathBuf) -> Result<()> {
+fn zip_dir(src_dir: &Path, dst_file: &Path) -> Result<()> {
     if !src_dir.exists() {
-        anyhow::bail!("src_dir '{}' does not exist", src_dir.display());
+        anyhow::bail!("src_dir `{}` does not exist", src_dir.display());
     }
 
     if !src_dir.is_dir() {
-        anyhow::bail!("src_dir '{}' is not a directory");
+        anyhow::bail!("src_dir `{}` is not a directory", src_dir.display());
     }
 
     let file = File::create(dst_file)?;
@@ -77,20 +77,21 @@ fn zip_dir(src_dir: &PathBuf, dst_file: &PathBuf) -> Result<()> {
 
         // Cargo.toml files cause the folder to excluded from `cargo package` so need to be renamed
         if name.file_name() == Some(OsStr::new("_Cargo.toml")) {
-            name.set_file_name("Cargo.toml")
+            name.set_file_name("Cargo.toml");
         }
 
-        if path.is_file() {
-            #[allow(deprecated)]
-            zip.start_file_from_path(name.as_path(), options)?;
-            let mut f = File::open(path)?;
-
-            f.read_to_end(&mut buffer)?;
-            zip.write_all(&*buffer)?;
-            buffer.clear();
-        } else if name.as_os_str().len() != 0 {
-            #[allow(deprecated)]
-            zip.add_directory_from_path(name.as_path(), options)?;
+        if let Some(name) = name.to_str() {
+            if path.is_file() {
+                zip.start_file(name, options)?;
+                let mut f = File::open(path)?;
+                f.read_to_end(&mut buffer)?;
+                zip.write_all(&*buffer)?;
+                buffer.clear();
+            } else if !name.is_empty() {
+                zip.add_directory(name, options)?;
+            }
+        } else {
+            anyhow::bail!("the path contains invalid UTF-8 characters: `{:?}`", name);
         }
     }
     zip.finish()?;

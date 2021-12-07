@@ -11,7 +11,7 @@ path = "main.rs"
 
 [dependencies.contract]
 path = "../../"
-package = "{{name}}"
+package = "contract"
 default-features = false
 features = ["liquid-abi-gen"]
 
