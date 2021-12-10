@@ -52,7 +52,7 @@ const BUILD_TARGET_ARCH: &str = "wasm32-unknown-unknown";
 const LOCAL_SCOPE: &str = "$local";
 
 /// Parses the manifest and returns relevant metadata.
-fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata> {
+fn collect_crate_metadata(manifest_path: &ManifestPath, use_gm: bool) -> Result<CrateMetadata> {
     let (metadata, root_package_id) = utils::get_cargo_metadata(manifest_path)?;
 
     // Find the root package by id in the list of packages. It is logical error if the root
@@ -74,10 +74,16 @@ fn collect_crate_metadata(manifest_path: &ManifestPath) -> Result<CrateMetadata>
     original_wasm.set_extension("wasm");
 
     let mut dest_wasm = metadata.target_directory.clone();
-    dest_wasm.push(package_name.clone());
+    if use_gm {
+        dest_wasm.push(package_name.clone() + "_gm");
+    } else {
+        dest_wasm.push(package_name.clone());
+    }
     dest_wasm.set_extension("wasm");
 
-    let mut dest_abi = dest_wasm.clone();
+    let mut dest_abi = metadata.target_directory.clone();
+    dest_abi.push(package_name.clone());
+
     dest_abi.set_extension("abi");
 
     let lang_dep = root_package
@@ -540,7 +546,7 @@ pub(crate) fn execute_build(
     let started = Instant::now();
 
     println!("[1/4] {} Collecting crate metadata", LOOKING_GLASS);
-    let crate_metadata = collect_crate_metadata(&manifest_path)?;
+    let crate_metadata = collect_crate_metadata(&manifest_path, use_gm)?;
 
     println!("[2/4] {} Building cargo project", TRUCK);
     let build_result = build_cargo_project(
