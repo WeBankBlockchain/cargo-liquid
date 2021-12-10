@@ -13,7 +13,7 @@ rustup toolchain install nightly
 ### 远端安装
 
 ```shell
-cargo install --git https://github.com/WeBankBlockchain/cargo-liquid --branch dev --force
+cargo install --git https://github.com/WeBankBlockchain/cargo-liquid --branch main --force
 ```
 
 ### 本地安装
