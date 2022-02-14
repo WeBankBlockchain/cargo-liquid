@@ -1,5 +1,5 @@
 name: Cargo-liquid Github Actions
-on: 
+on:
   push:
   pull_request:
   release:
@@ -19,7 +19,8 @@ jobs:
       - name: install rust nightly
         uses: actions-rs/toolchain@v1
         with:
-          components: rustc-dev, rust-src
+          toolchain: nightly-2021-06-23
+          components: rustc-dev, rust-src, llvm-tools-preview
       - name: install cargo-liquid
         run: cargo install --path . --force
       - name: compile test contract
