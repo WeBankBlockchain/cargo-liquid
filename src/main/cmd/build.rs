@@ -354,7 +354,7 @@ fn parse_ty(ty_info: &Map<String, Value>) -> String {
     }
 }
 
-fn calc_selector(source: &[u8], use_gm: bool) -> String {
+fn calc_selector(source: &[u8], use_gm: bool) -> u32 {
     let hash_result = if !use_gm {
         let mut hash_result = [0u8; 32];
         let mut keccak_hasher = tiny_keccak::Keccak::v256();
@@ -366,14 +366,12 @@ fn calc_selector(source: &[u8], use_gm: bool) -> String {
         sm3_hash.get_hash()
     };
 
-    let selector = u32::from_le_bytes([
+    u32::from_le_bytes([
         hash_result[0],
         hash_result[1],
         hash_result[2],
         hash_result[3],
-    ]) as i32;
-
-    format!("i32.const {}", selector)
+    ])
 }
 
 fn generate_abi(
@@ -430,20 +428,15 @@ fn generate_abi(
                         let fn_info = f.as_object().unwrap();
                         let ty = fn_info.get("type").unwrap().as_str().unwrap();
                         if ty == "function" {
-                            let fn_name =
-                                fn_info.get("name").unwrap().as_str().unwrap().to_string();
-                            let inputs = fn_info.get("inputs").unwrap().as_array().unwrap();
-                            let sig = inputs
-                                .iter()
-                                .map(|input| parse_ty(input.as_object().unwrap()))
-                                .join(",");
-                            let sig = format!("{}({})", fn_name, sig);
-                            let new_sel = calc_selector(sig.as_bytes(), use_gm);
-
+                            let (fn_name, new_sel) = get_name_and_selector(fn_info, use_gm);
+                            let new_sel = format!("i32.const {}", new_sel);
                             let old_sel = if is_iface {
-                                calc_selector((scope.to_owned() + &fn_name).as_bytes(), use_gm)
+                                format!(
+                                    "i32.const {}",
+                                    calc_selector((scope.to_owned() + &fn_name).as_bytes(), use_gm)
+                                )
                             } else {
-                                calc_selector(fn_name.as_bytes(), use_gm)
+                                format!("i32.const {}", calc_selector(fn_name.as_bytes(), use_gm))
                             };
 
                             let entry = sel_replacements
@@ -530,6 +523,18 @@ fn generate_abi(
     Ok(())
 }
 
+fn get_name_and_selector(fn_info: &Map<String, Value>, use_gm: bool) -> (String, u32) {
+    let fn_name = fn_info.get("name").unwrap().as_str().unwrap().to_string();
+    let inputs = fn_info.get("inputs").unwrap().as_array().unwrap();
+    let sig = inputs
+        .iter()
+        .map(|input| parse_ty(input.as_object().unwrap()))
+        .join(",");
+    let sig = format!("{}({})", fn_name, sig);
+    let new_sel = calc_selector(sig.as_bytes(), use_gm);
+    (fn_name, new_sel)
+}
+
 static LOOKING_GLASS: Emoji<'_, '_> = Emoji("🔍 ", "d(・ω・d)");
 static TRUCK: Emoji<'_, '_> = Emoji("🚚 ", "(∫・ω・)∫");
 static CLIP: Emoji<'_, '_> = Emoji("🔗 ", "∇(・ω・∇)");
@@ -578,11 +583,13 @@ pub(crate) fn execute_build(
                         && method.contains_key("type")
                         && method["type"] == Value::String("function".into())
                     {
-                        let method_name = String::from(method["name"].as_str().unwrap());
+                        // calculate selector of method
+                        let (method_name, selector) = get_name_and_selector(method, use_gm);
                         if cfa_result.contains_key(&method_name) {
                             method
                                 .insert("conflictFields".into(), cfa_result[&method_name].clone());
                         }
+                        method.insert("selector".into(), serde_json::to_value(selector).unwrap());
                     }
                 });
             let new_abi = serde_json::to_string(&origin_abi).unwrap();
