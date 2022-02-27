@@ -28,7 +28,7 @@ jobs:
       - name: setup python
         uses: actions/setup-python@v2
         with:
-          python-version: '3.x'
+          python-version: '3.8'
           architecture: 'x64'
       - name: verify conflict analysis result
         run: cd .\tests\conflict_analysis_test && python .\verify_conflict.py

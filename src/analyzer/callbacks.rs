@@ -130,18 +130,18 @@ impl AnalysisCallbacks {
             /// The index of which state variable will be visited.
             slot: usize,
             kind: field_kind::Type,
-            /// If `kind` equals to `All` or `Len`, then `path` must be empty;
+            /// If `kind` equals to `All` or `Len`, then `value` must be empty;
             ///
-            /// if `kind` equals to `Env`, then `path` must only contain one element, and the element
+            /// if `kind` equals to `Env`, then `value` must only contain one element, and the element
             /// represents which kind of context information the contract needs to acquire.
             ///
-            /// if `kind` equals to `Var`, then `path` contains an access path described via integer
+            /// if `kind` equals to `Var`, then `value` contains an access path described via integer
             /// indices, e.g., "[2, 0]" means key coming from the **1st** data member of the **3rd**
             /// parameter;
             ///
-            /// if `kind` equals to `Const`, the `path` contains the **raw** bytes representation of
+            /// if `kind` equals to `Const`, the `value` contains the **raw** bytes representation of
             /// the corresponding constant value.
-            path: Vec<usize>,
+            value: Vec<usize>,
             /// Whether this conflict field is used to visit some a state variable mutably.
             read_only: bool,
         }
@@ -244,7 +244,7 @@ impl AnalysisCallbacks {
                         FieldDesc {
                             slot: *container,
                             kind,
-                            path,
+                            value: path,
                             read_only: *read_only,
                         }
                     } else {
@@ -289,14 +289,14 @@ impl AnalysisCallbacks {
                 let field_i = &conflict_fields[i];
                 let field_j = &conflict_fields[j];
                 if field_i.kind == field_j.kind
-                    && field_i.path == field_j.path
+                    && field_i.value == field_j.value
                     && field_i.slot == field_j.slot
                     && !field_i.read_only
                     && field_j.read_only
                 {
                     add_to_composed(FieldDesc {
                         kind: field_i.kind,
-                        path: field_i.path.clone(),
+                        value: field_i.value.clone(),
                         slot: field_i.slot,
                         read_only: false,
                     });
