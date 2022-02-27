@@ -433,10 +433,10 @@ fn generate_abi(
                             let old_sel = if is_iface {
                                 format!(
                                     "i32.const {}",
-                                    calc_selector((scope.to_owned() + &fn_name).as_bytes(), use_gm)
+                                    calc_selector((scope.to_owned() + &fn_name).as_bytes(), use_gm) as i32
                                 )
                             } else {
-                                format!("i32.const {}", calc_selector(fn_name.as_bytes(), use_gm))
+                                format!("i32.const {}", calc_selector(fn_name.as_bytes(), use_gm) as i32)
                             };
 
                             let entry = sel_replacements
