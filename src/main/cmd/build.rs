@@ -433,10 +433,14 @@ fn generate_abi(
                             let old_sel = if is_iface {
                                 format!(
                                     "i32.const {}",
-                                    calc_selector((scope.to_owned() + &fn_name).as_bytes(), use_gm) as i32
+                                    calc_selector((scope.to_owned() + &fn_name).as_bytes(), use_gm)
+                                        as i32
                                 )
                             } else {
-                                format!("i32.const {}", calc_selector(fn_name.as_bytes(), use_gm) as i32)
+                                format!(
+                                    "i32.const {}",
+                                    calc_selector(fn_name.as_bytes(), use_gm) as i32
+                                )
                             };
 
                             let entry = sel_replacements
@@ -589,7 +593,19 @@ pub(crate) fn execute_build(
                             method
                                 .insert("conflictFields".into(), cfa_result[&method_name].clone());
                         }
-                        method.insert("selector".into(), serde_json::to_value(selector).unwrap());
+                        if use_gm {
+                            let (_, normal_selector) = get_name_and_selector(method, false);
+                            method.insert(
+                                "selector".into(),
+                                serde_json::to_value(vec![normal_selector, selector]).unwrap(),
+                            );
+                        } else {
+                            let (_, gm_selector) = get_name_and_selector(method, true);
+                            method.insert(
+                                "selector".into(),
+                                serde_json::to_value(vec![selector, gm_selector]).unwrap(),
+                            );
+                        }
                     }
                 });
             let new_abi = serde_json::to_string(&origin_abi).unwrap();
