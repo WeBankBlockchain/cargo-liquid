@@ -414,10 +414,14 @@ fn generate_abi(
         let status = cmd
             .status()
             .context(format!("Error executing `{:?}`", cmd))?;
+        // println!("execute {:?}, status {:?}", cmd, status);
         if status.success() {
             if !crate_meta.is_collaboration {
                 let dest_abi = &crate_meta.dest_abi;
-                let abi_content = fs::read_to_string(dest_abi)?;
+                let abi_content = fs::read_to_string(dest_abi).expect(&format!(
+                    "Failed to read the ABI file '{}'",
+                    dest_abi.display()
+                ));
                 let abi: Map<String, Value> = serde_json::from_str(&abi_content)?;
 
                 let mut sel_replacements: HashMap<String, HashMap<String, _, _>> = HashMap::new();

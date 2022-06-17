@@ -373,7 +373,7 @@ impl Workspace {
         let tmp_dir = tempfile::Builder::new()
             .prefix(".cargo-contract_")
             .tempdir()?;
-        let new_paths = self.write(&tmp_dir)?;
+        let new_paths = self.write(&tmp_dir).expect(format!("writing the temporary file failed, dir: {:?}", tmp_dir.path()).as_str());
         let root_manifest_path = new_paths
             .iter()
             .find_map(|(pid, path)| {
