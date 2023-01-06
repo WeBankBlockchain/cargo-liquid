@@ -7,7 +7,7 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1.0.32"
-structopt = "0.3.16"
+structopt = "0.3.26"
 heck = "0.3.1"
 colored = "2.0.0"
 zip = "0.5.6"
@@ -43,6 +43,6 @@ walkdir = "2.3.1"
 name = "cargo-liquid"
 path = "src/main/main.rs"
 
-#[[bin]]
-#name = "liquid-analy"
-#path = "src/analyzer/main.rs"
+# [[bin]]
+# name = "liquid-analy"
+# path = "src/analyzer/main.rs"

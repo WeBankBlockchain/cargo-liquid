@@ -17,10 +17,10 @@ use rustc_version::Channel;
 
 pub fn get_cargo_metadata(manifest_path: &ManifestPath) -> Result<(CargoMetadata, PackageId)> {
     let mut cmd = MetadataCommand::new();
-    let metadata = cmd
-        .manifest_path(manifest_path)
-        .exec()
-        .context("Error invoking `cargo metadata`")?;
+    let metadata = cmd.manifest_path(manifest_path).exec().context(format!(
+        "Error invoking `cargo metadata` on {:#?}",
+        manifest_path
+    ))?;
     let root_packaged_id = metadata
         .resolve
         .as_ref()

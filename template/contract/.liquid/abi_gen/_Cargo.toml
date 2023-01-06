@@ -17,7 +17,7 @@ features = ["liquid-abi-gen"]
 
 [dependencies.liquid_lang]
 git = "https://github.com/WeBankBlockchain/liquid"
-tag = "v1.0.0-rc2"
+rev = "c678d9586b4335fc302a4c02a564d8ee6964be1d"
 package = "liquid_lang"
 default-features = false
 features = ["contract-abi-gen"]
