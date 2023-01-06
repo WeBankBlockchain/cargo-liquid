@@ -118,9 +118,9 @@ dependencies = [
 
 [[package]]
 name = "cargo-xbuild"
-version = "0.6.5"
+version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1fb8bc85fbeb16ebf6dd43742567db3abedf90a955f6503482310cb3e3013f6"
+checksum = "987798b27e756d39dd4b5d433e81f3c9cdf34cc82d303a749a552f54034c985b"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -871,9 +871,9 @@ checksum = "6446ced80d6c486436db5c078dde11a9f73d42b57fb273121e160b84f63d894c"
 
 [[package]]
 name = "structopt"
-version = "0.3.25"
+version = "0.3.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40b9788f4202aa75c240ecc9c15c65185e6a39ccdeb0fd5d008b98825464c87c"
+checksum = "0c6b5c64445ba8094a6ab0c3cd2ad323e07171012d9c98b0b15651daf1787a10"
 dependencies = [
  "clap",
  "lazy_static",

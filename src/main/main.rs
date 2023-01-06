@@ -59,7 +59,7 @@ enum VerbosityBehavior {
 #[derive(StructOpt)]
 struct AnalysisFlags {
     /// If this flag is set, the analysis process will be skipped unconditionally.
-    #[structopt(long)]
+    #[structopt(long, parse(try_from_str), default_value = "true")]
     skip_analysis: bool,
 }
 

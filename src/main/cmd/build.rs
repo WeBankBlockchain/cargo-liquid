@@ -146,6 +146,9 @@ fn run_xargo_build(
             memcpy: false,
             panic_immediate_abort: true,
         };
+        if let VerbosityBehavior::Verbose = verbosity_behavior {
+            println!("manifest_path: {:#?}", manifest_path);
+        }
         let exit_status = xargo_lib::build(args, "build", Some(config))
             .map_err(|e| anyhow::anyhow!("{}", e))
             .context("Building with xargo")?;
