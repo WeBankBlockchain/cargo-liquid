@@ -9,12 +9,14 @@ use log::*;
 use rustc_middle::{
     mir::{
         interpret::{AllocRange, ConstValue, GlobalAlloc, Scalar},
-        BorrowKind, Constant, ConstantKind, Local, Mutability, Operand, Place, PlaceElem, Rvalue,
-        StatementKind, TerminatorKind, RETURN_PLACE,
+        BorrowKind, Constant, ConstantKind, Local, Mutability, Operand, Place,
+        PlaceElem, Rvalue, StatementKind, TerminatorKind, RETURN_PLACE,
     },
     ty::{ConstKind, ParamEnv, ScalarInt, Ty, TyCtxt, TyKind},
 };
-use rustc_mir::dataflow::{impls::MaybeBorrowedLocals, Analysis};
+//consts::valtree::ValTree
+use rustc_mir_dataflow::{impls::borrowed_locals, impls::MaybeBorrowedLocals, Analysis};
+//use rustc_mir_transform::const_prop;
 use rustc_span::def_id::DefId;
 use rustc_target::abi::Size;
 use std::{
@@ -23,15 +25,19 @@ use std::{
     iter::FromIterator,
 };
 
+//use rustc_middle::traits::ObligationPredicate;
+
+use rustc_target::asm::X86InlineAsmReg::cx;
+
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub struct AccessPath {
     pub base: Local,
     pub fields: Vec<usize>,
 }
 
-impl<'tcx> TryFrom<&'tcx Place<'tcx>> for AccessPath {
+impl<'tcx> TryFrom<Place<'tcx>> for AccessPath {
     type Error = ();
-    fn try_from(value: &'tcx Place<'tcx>) -> Result<Self, Self::Error> {
+    fn try_from(value: Place<'tcx>) -> Result<Self, Self::Error> {
         let base = value.local;
         let mut fields = vec![];
         for place_elem in value.projection {
@@ -126,7 +132,7 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
         }
         self.var_defs.entry(def_id).or_default();
         let body = self.tcx.optimized_mir(def_id);
-        let basic_blocks = body.basic_blocks();
+        let basic_blocks = &body.basic_blocks;
 
         let mut record_def =
             |l_local: Local, r_local: Local, projection: &'tcx [PlaceElem<'tcx>]| {
@@ -167,7 +173,7 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                                     _ => (),
                                 },
                                 Rvalue::Ref(_, borrow_kind, r_place) => {
-                                    if borrow_kind == &BorrowKind::Shared {
+                                    if *borrow_kind == BorrowKind::Shared {
                                         let last_proj = r_place.as_ref().last_projection();
                                         if let Some((_, last_proj)) = last_proj {
                                             if last_proj == PlaceElem::Deref {
@@ -198,14 +204,16 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
         }
 
         let param_env = ParamEnv::reveal_all();
-        let mut results = MaybeBorrowedLocals::mut_borrows_only(self.tcx, body, param_env)
-            .unsound_ignore_borrow_on_drop()
+
+        //let mut results = MaybeBorrowedLocals::mut_borrows_only(self.tcx, body, param_env)    // modify 20  cannot modify -------------------
+        let mut results = MaybeBorrowedLocals {}
+            //.unsound_ignore_borrow_on_drop()
             .into_engine(self.tcx, body)
             .iterate_to_fixpoint()
             .into_results_cursor(body);
 
         let mut maybe_mut_borrowed_in_method = HashSet::new();
-        for bb in body.basic_blocks().indices() {
+        for bb in body.basic_blocks.indices() {
             results.seek_before_primary_effect(body.terminator_loc(bb));
             let state = results.get();
             for local in state.iter() {
@@ -245,7 +253,7 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
 
     fn process_assignment(
         &self,
-        dst: &Place<'tcx>,
+        dst: Place<'tcx>,
         src: Option<&Place<'tcx>>,
         dst_method_id: DefId,
         src_method_id: DefId,
@@ -323,7 +331,7 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
             }
         }
 
-        let src = AccessPath::try_from(src.unwrap());
+        let src = AccessPath::try_from(*(src.unwrap()));
         if src.is_err() {
             return Self::identity();
         }
@@ -483,21 +491,27 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                         // Do not try to read less or more bytes than that.
                         // The remaining bytes must be 0.
                         let size = int.size().bytes() as usize;
-                        let data = if int == &ScalarInt::ZST {
-                            0u128
-                        } else {
-                            int.to_bits(int.size()).unwrap()
-                        };
+                        //let data = if int == &ScalarInt::try_to_target_usize {     // modify 21  cannot modify   not found Zst
+                        let data = int.to_bits(int.size()).unwrap();
+                        // let data = if int == &ScalarInt::Zst{
+                        //     0u128
+                        // } else {
+                        //     int.to_bits(int.size()).unwrap()
+                        // };
                         let bytes = &data.to_le_bytes()[..size];
                         return Some(bytes.to_vec());
                     }
-                    Scalar::Ptr(ptr) => match self.tcx.get_global_alloc(ptr.alloc_id) {
+                    //Scalar::Ptr(ptr,_) => match self.tcx.get_global_alloc(ptr.alloc_id) {
+                    Scalar::Ptr(ptr, _) => match self.tcx.try_get_global_alloc(ptr.provenance) {
+                        //// modify 22
                         Some(GlobalAlloc::Memory(alloc)) => {
-                            let alloc_len = alloc.len() as u64;
-                            let offset = ptr.offset;
+                            let alloc_len = alloc.0.len() as u64;
+                            let (_, offset) = ptr.into_parts(); //modify 23
+                                                                //let offset = ptr.offset(rustc_target::abi::Size::from_bytes(8), _); //modify my_arg of _
+
                             assert!(alloc_len > offset.bytes());
                             let size = alloc_len - offset.bytes();
-                            if let Ok(bytes) = alloc.get_bytes(
+                            if let Ok(bytes) = alloc.inner().get_bytes_strip_provenance(
                                 &self.tcx,
                                 AllocRange {
                                     start: offset,
@@ -513,8 +527,12 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
             }
             ConstValue::Slice { data, start, end } => {
                 assert!(end > start);
-                if data.mutability == Mutability::Not {
-                    let bytes = data.get_bytes(
+                let data_ = data.inner();
+                //if data.0.0.mutability == Mutability::Not {
+                if data_.mutability == Mutability::Not {
+                    //get the mutability of  [data_] with the type of [rustc_middle::mir::interpret::Allocation]
+                    let bytes = data_.get_bytes_strip_provenance(
+                        // get_bytes -> get_bytes_strip_provenance
                         &self.tcx,
                         AllocRange {
                             start: Size::from_bytes(*start),
@@ -539,26 +557,43 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                     return Some(resolved_val);
                 }
             }
-            ConstantKind::Ty(constant) => match &constant.val {
+            ConstantKind::Ty(constant) => match &constant.kind() {
                 ConstKind::Unevaluated(unevaluated) => {
                     let param_env = ParamEnv::reveal_all();
+                    let unevaluated = rustc_middle::mir::UnevaluatedConst::new(unevaluated.def,unevaluated.substs);
                     if let Some(resolved_val) = self
                         .tcx
-                        .const_eval_resolve(param_env, *unevaluated, None)
+                        //.const_eval_resolve(param_env, *UnevaluatedConst, None)
+                        .const_eval_resolve(param_env, unevaluated, None) //modify 24 cannot modify
                         .and_then(|resolved| Ok(self.resolve_const_val(&resolved)))
                         .ok()
                         .flatten()
+                    /*
+                    pub fn const_eval_resolve(
+                               self,
+                               param_env: ParamEnv<'tcx>,
+                               ct: UnevaluatedConst<'tcx>,
+                               span: Option<Span>
+                           ) -> EvalToConstValueResult<'tcx>
+                    */
                     {
                         return Some(resolved_val);
                     }
                 }
                 ConstKind::Value(val) => {
-                    if let Some(resolved_val) = self.resolve_const_val(val) {
+                    //ConstValue
+                    //let scalar_val = valtree.try_to_scalar();
+
+                    if let Some(resolved_val) = self.resolve_const_val(&self.tcx.valtree_to_const_val((constant.ty(), val.clone()))) {
+                        // modify 25 cannot modify   not found
                         return Some(resolved_val);
-                    }
+                    } // val {ValTree}, not ConstValue, if it is directly casted to ConstValue, the type of [val] which could be Scalar or Slice needs to be clear;
+                      // is val is Scalar , let scalar = &constant.kind().try_to_scalar();    ;
+                      //if let Some(resolved_val) = self.resolve_const_val(value) {
                 }
                 _ => (),
             },
+            _=> return None, //  TODO: Unevaluated(UnevaluatedConst<'tcx>, Ty<'tcx>)?
         }
         None
     }
@@ -596,7 +631,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
 
         let caller = self.icfg.get_method_by_index(call_site.belongs_to);
         let basic_block = call_site.basic_block.unwrap();
-        let bbd = &self.tcx.optimized_mir(caller.def_id).basic_blocks()[basic_block];
+        let bbd = &self.tcx.optimized_mir(caller.def_id).basic_blocks[basic_block];
         let terminator = bbd.terminator.as_ref().unwrap();
         let caller_id = caller.def_id;
         let callee_id = callee.def_id;
@@ -608,36 +643,36 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
         {
             if callee.used_for_clone {
                 // Maybe this callee is a implementation provided by user.
-                let dst = match destination {
-                    Some((place, _)) => place,
-                    _ => unreachable!(),
-                };
+                //let dst = match destination {  // modify 26 cannot modify   not found
+                 //   Some((place, _)) => place,
+                // _ => unreachable!(),
+                //};
                 let src = match &args[0] {
                     Operand::Move(place) | Operand::Copy(place) => place,
                     _ => unreachable!(),
                 };
-                return self.process_assignment(dst, Some(src), caller_id, caller_id);
+                return self.process_assignment(*destination, Some(src), caller_id, caller_id);
             }
 
             self.insert_var_defs(callee);
 
-            if let Some((ret_place, _)) = destination {
-                let ret_local = ret_place.local;
-                return self.process_assignment(
-                    &Place {
-                        local: ret_local,
-                        projection: self.tcx.intern_place_elems(&[]),
-                    },
-                    Some(&Place {
-                        local: RETURN_PLACE,
-                        projection: self.tcx.intern_place_elems(&[]),
-                    }),
-                    caller_id,
-                    callee_id,
-                );
-            } else {
-                Self::empty()
-            }
+            // if let Some((ret_place, _)) = destination {         // modify 27 cannot modify   not found
+            let ret_local = destination.local; // modify 28 cannot modify   not found
+            return self.process_assignment(
+                Place {
+                    local: ret_local,
+                    projection: self.tcx.intern_place_elems(&[]),
+                },
+                Some(&Place {
+                    local: RETURN_PLACE,
+                    projection: self.tcx.intern_place_elems(&[]),
+                }),
+                caller_id,
+                callee_id,
+            );
+            // } else {
+            //     Self::empty()
+            // }
         } else {
             unreachable!("the kind of terminator at call site must be `Call`")
         }
@@ -656,7 +691,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
 
         let caller = self.icfg.get_method_by_index(call_site.belongs_to);
         let basic_block = call_site.basic_block.unwrap();
-        let call_site_bbd = &self.tcx.optimized_mir(caller.def_id).basic_blocks()[basic_block];
+        let call_site_bbd = &self.tcx.optimized_mir(caller.def_id).basic_blocks[basic_block];
         let terminator = call_site_bbd.terminator.as_ref().unwrap();
         let caller_id = caller.def_id;
 
@@ -749,7 +784,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
         let body = self.tcx.optimized_mir(method.def_id);
         let local_decls = &body.local_decls;
         let basic_block = curr.basic_block.unwrap();
-        let bbd = &body.basic_blocks()[basic_block];
+        let bbd = &body.basic_blocks[basic_block];
         let method_id = method.def_id;
         let maybe_mut_borrowed = self.maybe_mut_borrowed.clone();
 
@@ -777,10 +812,21 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
             assert!(callees.len() == 1);
             let callee = callees[0];
 
-            let dst = match destination {
-                Some((place, _)) => place,
-                _ => unreachable!(),
-            };
+            let dst = destination.clone(); //match destination {
+                                           //Some((place, _)) => place.clone(),                    // modify 29 cannot modify   not found
+                                           //   None => unreachable!(),
+                                           // };//mistake:j2:unsolve
+
+            //let dst = match destination {
+            //  Some((place, _)) => Some(place.clone()),
+            //None => None,
+            //}.unwrap_or_else(|| {
+            // 处理没有元素的情况
+            // 返回一个默认值
+            // 这里返回一个空的 `rustc_middle::mir::Place` 实例
+            //  rustc_middle::mir::Place::return_place()
+            //});
+
             if callee.used_for_clone {
                 // The reason why a method used for cloning coming into this position is that
                 // that method must have no MIR body.
@@ -1101,15 +1147,15 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                                 Rvalue::Use(r_operand) => match r_operand {
                                     Operand::Move(r_place) | Operand::Copy(r_place) => {
                                         let flow_fn = self.process_assignment(
-                                            l_place,
-                                            Some(r_place),
+                                            *l_place,
+                                            Some(&r_place),
                                             method_id,
                                             method_id,
                                         );
                                         return Some(Either::Left(flow_fn));
                                     }
                                     Operand::Constant(box constant) => {
-                                        if let Some(constant) = self.resolve_const(constant) {
+                                        if let Some(constant) = self.resolve_const(&constant) {
                                             return Some(Either::Right((
                                                 l_place.clone(),
                                                 constant,
@@ -1118,10 +1164,10 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                                     }
                                 },
                                 Rvalue::Ref(_, kind, r_place) => {
-                                    if kind == &BorrowKind::Shared {
+                                    if *kind == BorrowKind::Shared {
                                         let flow_fn = self.process_assignment(
-                                            l_place,
-                                            Some(r_place),
+                                            *l_place,
+                                            Some(&r_place),
                                             method_id,
                                             method_id,
                                         );
@@ -1131,7 +1177,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                                 _ => (),
                             }
                             Some(Either::Left(
-                                self.process_assignment(l_place, None, method_id, method_id),
+                                self.process_assignment(*l_place, None, method_id, method_id),
                             ))
                         } else {
                             None
@@ -1142,7 +1188,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
 
             Box::new(move |fact| {
                 let mut results = HashSet::from_iter([fact.clone()]);
-                for item in &assignments {
+                for item in &assignments { // 
                     match item {
                         Either::Left(flow_fn) => {
                             let facts = results.drain().collect::<Vec<_>>();
@@ -1164,7 +1210,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                                     read_only,
                                 } = &fact
                                 {
-                                    if let Ok(l_ap) = AccessPath::try_from(l_place) {
+                                    if let Ok(l_ap) = AccessPath::try_from(*l_place) {  //maybe try_from biancheng from
                                         if access_path == &l_ap {
                                             results.insert(ConflictField::Field {
                                                 container: *container,
@@ -1201,30 +1247,31 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
         let method = self.icfg.get_method_by_index(call_site.belongs_to);
         let body = self.tcx.optimized_mir(method.def_id);
         let basic_block = call_site.basic_block.unwrap();
-        let bbd = &body.basic_blocks()[basic_block];
+        let bbd = &body.basic_blocks[basic_block];
         let terminator = bbd.terminator.as_ref().unwrap();
 
         if let TerminatorKind::Call { destination, .. } = &terminator.kind {
-            if let Some((ret_place, _)) = destination {
-                let ret_local = ret_place.local;
-                return Box::new(move |fact| {
-                    let mut results = HashSet::new();
-                    if let ConflictField::Field {
-                        key: Key::Var(_, access_path),
-                        ..
-                    } = fact
-                    {
-                        if access_path.base != ret_local {
-                            results.insert(fact.clone());
-                        }
-                    } else {
+            //if let Some((ret_place, _)) = destination {           // modify 30 cannot modify   not found
+            //let ret_local = ret_place.flush();
+            let ret_local = destination.local; // modify 31 cannot modify   not found
+            return Box::new(move |fact| {
+                let mut results = HashSet::new();
+                if let ConflictField::Field {
+                    key: Key::Var(_, access_path),
+                    ..
+                } = fact
+                {
+                    if access_path.base != ret_local {
                         results.insert(fact.clone());
                     }
-                    results
-                });
-            } else {
-                Self::identity()
-            }
+                } else {
+                    results.insert(fact.clone());
+                }
+                results
+            });
+            // } else {
+            //    Self::identity()
+            //}
         } else {
             unreachable!("the kind of terminator at call site must be `Call`")
         }

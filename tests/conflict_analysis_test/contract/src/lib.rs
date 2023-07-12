@@ -50,11 +50,11 @@ mod contract {
 
         // test cases for kind 0
         pub fn visit_val_container(&mut self) {
-            self.val_container.set(0);
-        }
+             self.val_container.set(0);
+         }
 
-        // test cases for kind 1
-        pub fn change_complex_data_structure(&mut self) {
+         // test cases for kind 1
+         pub fn change_complex_data_structure(&mut self) {
             let child = Child {
                 year: 8,
                 name: String::from("child"),

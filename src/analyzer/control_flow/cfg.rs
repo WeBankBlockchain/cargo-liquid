@@ -275,7 +275,7 @@ impl<'tcx> ForwardCFG<'tcx> {
                         let basic_block = node.basic_block.unwrap();
                         writeln!(escaper, "bb{}(call-counterpart):", basic_block.as_usize())
                             .unwrap();
-                        let terminator = self.tcx.optimized_mir(method.def_id).basic_blocks()
+                        let terminator = self.tcx.optimized_mir(method.def_id).basic_blocks
                             [basic_block]
                             .terminator
                             .as_ref();
@@ -291,7 +291,7 @@ impl<'tcx> ForwardCFG<'tcx> {
                             ref statements,
                             ref terminator,
                             ..
-                        } = self.tcx.optimized_mir(method.def_id).basic_blocks()[basic_block];
+                        } = self.tcx.optimized_mir(method.def_id).basic_blocks[basic_block];
 
                         for statement in statements {
                             writeln!(escaper, "{:?};", statement).unwrap();

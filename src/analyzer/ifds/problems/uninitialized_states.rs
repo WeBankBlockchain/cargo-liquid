@@ -107,7 +107,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for UninitializedStates<'tcx, 'graph> {
             let curr_method = self.icfg.get_method_by_index(curr.belongs_to);
             let body = self.tcx.optimized_mir(curr_method.def_id);
             let basic_block = curr.basic_block.unwrap();
-            let bbd = &body.basic_blocks()[basic_block];
+            let bbd = &body.basic_blocks[basic_block];
             let BasicBlockData { terminator, .. } = bbd;
             let terminator = terminator.as_ref().unwrap();
 
