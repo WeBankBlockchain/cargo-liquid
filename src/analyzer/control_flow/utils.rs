@@ -106,7 +106,7 @@ fn specialize_generic_arg<'tcx>(
     match generic_arg.unpack() {
         GenericArgKind::Type(ty) => specialize_type_generic_arg(tcx, ty, generic_args_map).into(),
         GenericArgKind::Const(constant) => {
-            specialize_const_generic_arg(constant, generic_args_map).into() // ???  //讲借用变成了没有借用
+            specialize_const_generic_arg(constant, generic_args_map).into() // ???  
         }
         _ => *generic_arg,
     }
