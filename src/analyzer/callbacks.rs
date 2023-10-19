@@ -30,11 +30,13 @@ use rustc_hir::{def::DefKind, def_id::DefId, definitions::DefPathData};
 use rustc_interface::{interface::Compiler, Queries};
 use rustc_middle::{
     mir::{
-        BindingForm, Body, ClearCrossCrate, ImplicitSelfKind, Local, LocalInfo, Operand,
-        TerminatorKind,
+        BindingForm, Body, ClearCrossCrate, Local, LocalInfo, Operand,
+        TerminatorKind,                             //ImplicitSelfKind                                 
     },
-    ty::{DefIdTree, Ty, TyCtxt, TyKind, Visibility},
+    ty::{DefIdTree, Ty, TyCtxt, TyKind, Visibility},  
 };
+use rustc_hir::ImplicitSelfKind;       //modify: rust_middle::mir::ImplicitSelfKind --> this line
+//use rustc_middle::ty::adjustment; 
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet, LinkedList},
@@ -130,6 +132,7 @@ impl AnalysisCallbacks {
             /// The index of which state variable will be visited.
             slot: usize,
             kind: field_kind::Type,
+            
             /// If `kind` equals to `All` or `Len`, then `value` must be empty;
             ///
             /// if `kind` equals to `Env`, then `value` must only contain one element, and the element
@@ -177,23 +180,21 @@ impl AnalysisCallbacks {
 
         let target_dir = PathBuf::from(env::var("LIQUID_ANALYSIS_TARGET_DIR").unwrap());
         let bwd_cfg = BackwardCFG::new(&fwd_cfg);
-        let mut field_descs = HashMap::new();
-
+        let mut field_descs: HashMap<String, Vec<FieldDesc>> = HashMap::new();
         for method_index in mut_methods {
             let method_index = *method_index;
             let method = bwd_cfg.get_method_by_index(method_index);
             let results = if contains_interface_invocation(method) {
                 HashSet::new()
             } else {
-                let problem = ConflictFields::new(tcx, &bwd_cfg, method_index, storage_ty);
-                let mut ifds_solver = IfdsSolver::new(problem, &bwd_cfg, true);
-                ifds_solver.solve();
-                let end_point = bwd_cfg.get_end_points_of(method);
+                let problem = ConflictFields::new(tcx, &bwd_cfg, method_index, storage_ty); // work1    
+                let mut ifds_solver = IfdsSolver::new(problem, &bwd_cfg, true);// init set    
+                ifds_solver.solve(); // work2       
+                let end_point = bwd_cfg.get_end_points_of(method);          
                 debug_assert!(end_point.len() == 1);
                 let end_point = end_point[0];
                 ifds_solver.get_results_at(end_point)
             };
-
             let method_id = method.def_id;
             let fn_name = tcx.item_name(method_id);
             let fn_name = format!("{}", fn_name.as_str());
@@ -240,6 +241,7 @@ impl AnalysisCallbacks {
                                 bytes.iter().map(|byte| *byte as usize).collect::<Vec<_>>(),
                             ),
                         };
+                        // let (kind,path) = (field_kind::CONST,vec![]);
 
                         FieldDesc {
                             slot: *container,
@@ -261,7 +263,6 @@ impl AnalysisCallbacks {
                     composed_conflict_fields.push(field_to_add);
                     return;
                 }
-
                 if composed_conflict_fields
                     .iter()
                     .rposition(|field| {
@@ -310,7 +311,6 @@ impl AnalysisCallbacks {
                 field_descs.insert(fn_name, composed_conflict_fields);
             }
         }
-
         fs::write(
             target_dir.join("conflict_fields.analysis"),
             format!("{}", serde_json::to_string(&field_descs).unwrap()),
@@ -329,7 +329,6 @@ impl AnalysisCallbacks {
         let problem = UninitializedStates::new(tcx, &fwd_cfg, constructor, storage_ty);
         let mut ifds_solver = IfdsSolver::new(problem, &fwd_cfg, true);
         ifds_solver.solve();
-
         let subgraph = fwd_cfg.graph.filter_map(
             |node_idx, _| Some(fwd_cfg.graph.node_weight(node_idx).unwrap()),
             |edge_idx, _| {
@@ -371,17 +370,15 @@ impl AnalysisCallbacks {
         // check this invariant again.
         let mut dfs = Dfs::new(&subgraph, fwd_cfg.node_to_index[start_points[0]]);
         let session = compiler.session();
-
         while let Some(node_index) = dfs.next(&subgraph) {
             let node = fwd_cfg.graph.node_weight(node_index).unwrap();
             if fwd_cfg.is_call(node) {
                 let belongs_to = node.belongs_to;
                 let method = fwd_cfg.get_method_by_index(belongs_to);
                 let body = tcx.optimized_mir(method.def_id);
-                let bbd = &body.basic_blocks()[node.basic_block.unwrap()];
+                let bbd = &body.basic_blocks[node.basic_block.unwrap()];
                 let terminator = bbd.terminator();
                 let local_decls = &body.local_decls;
-
                 if let TerminatorKind::Call { func, args, .. } = &terminator.kind {
                     if let TyKind::FnDef(def_id, ..) = func.ty(local_decls, tcx).kind() {
                         let fn_name = KnownNames::get(tcx, *def_id);
@@ -407,6 +404,7 @@ impl AnalysisCallbacks {
                                 | KnownNames::LiquidStorageCollectionsIterableMappingUse
                                 | KnownNames::LiquidStorageCollectionsIterableMappingIterNext
                         ) {
+                            //println!("Callback----------------383838");
                             let results = ifds_solver.get_results_at(node);
                             let indices = results
                                 .into_iter()
@@ -439,11 +437,10 @@ impl AnalysisCallbacks {
                 }
             }
         }
-
         let states = if let TyKind::Adt(adt_def, ..) = storage_ty.kind() {
             adt_def
                 .all_fields()
-                .map(|field_def| format!("`{}`", field_def.ident.name))
+                .map(|field_def| format!("`{}`", field_def.ident(tcx).name))
                 .enumerate()
                 .collect::<HashMap<_, _>>()
         } else {
@@ -464,14 +461,13 @@ impl AnalysisCallbacks {
                     })
                     .collect::<Vec<_>>();
                 final_result.sort();
-
                 let belongs_to = end_point.belongs_to;
                 let method = fwd_cfg.get_method_by_index(belongs_to);
                 let body = tcx.optimized_mir(method.def_id);
                 let preds = fwd_cfg.get_preds_of(end_point);
                 assert!(preds.len() == 1);
 
-                let bbd = &body.basic_blocks()[preds[0].basic_block.unwrap()];
+                let bbd = &body.basic_blocks[preds[0].basic_block.unwrap()];
                 let terminator = bbd.terminator();
                 session.span_warn(
                     terminator.source_info.span,
@@ -513,18 +509,24 @@ impl AnalysisCallbacks {
         match ty.kind() {
             TyKind::Adt(adt_def, substs) => {
                 let def_path = tcx
-                    .def_path(adt_def.did)
+                    .def_path(adt_def.did())
                     .data
                     .iter()
                     .filter_map(|disambiguated_def_path_data| {
                         if let DefPathData::TypeNs(symbol) = disambiguated_def_path_data.data {
-                            Some(symbol.as_str())
+                            Some(symbol.to_string())
+                            //Some(symbol.as_str())
                         } else {
                             None
                         }
                     })
                     .collect::<Vec<_>>();
-                if def_path == VEC_ITER_NS || def_path == ITERABLE_MAPPING_ITER_NS {
+                let VEC_ITER_NS_STRING = VEC_ITER_NS.iter().map(|s|{s.to_string()}).collect::<Vec<String>>();
+                let ITERABLE_MAPPING_ITER_NS_STRING = ITERABLE_MAPPING_ITER_NS.iter().map(|s|{s.to_string()}).collect::<Vec<String>>();
+                //println!("{:?}, {:?}, {:?}",def_path, VEC_ITER_NS_STRING, ITERABLE_MAPPING_ITER_NS_STRING);
+                
+                if def_path == VEC_ITER_NS_STRING || def_path == ITERABLE_MAPPING_ITER_NS_STRING { // ??????????????????????????-------------------------
+                //if def_path == VEC_ITER_NS|| def_path == ITERABLE_MAPPING_ITER_NS { // ??????????????????????????-------------------------
                     return false;
                 }
 
@@ -543,7 +545,16 @@ impl AnalysisCallbacks {
             TyKind::RawPtr(type_and_mut) => Self::related_to(tcx, &type_and_mut.ty, tys),
             TyKind::Ref(_, ty, _) => Self::related_to(tcx, ty, tys),
             TyKind::Array(ty, _) => Self::related_to(tcx, ty, tys),
-            TyKind::Tuple(substs) => substs.types().any(|ty| Self::related_to(tcx, &ty, tys)),
+            //TyKind::Tuple(substs) => substs.types().any(|ty| Self::related_to(tcx, &ty, tys)),
+            //TyKind::Tuple(substs) => substs.as_ref().types().any(|ty| Self::related_to(tcx, &ty, tys)),
+            //match ty.kind() {
+             //   TyKind::Tuple(substs) => substs.iter().any(|ty| Self::related_to(tcx, &ty, tys)),
+               // _ => false,
+            //}
+
+            // modify 20230705 
+            TyKind::Tuple(substs) => substs.as_substs().types().any(|ty| Self::related_to(tcx, &ty, tys)),
+
             _ => false,
         }
     }
@@ -551,7 +562,7 @@ impl AnalysisCallbacks {
     fn deref_ty<'tcx>(ty: Ty<'tcx>) -> Ty {
         let mut nested_ty = ty;
         while let TyKind::Ref(_, sub_ty, _) = nested_ty.kind() {
-            nested_ty = sub_ty;
+            nested_ty = *sub_ty;
         }
         nested_ty
     }
@@ -581,7 +592,7 @@ impl AnalysisCallbacks {
                 let substs = &method.substs;
                 let body = tcx.optimized_mir(def_id);
                 let local_decls = &body.local_decls;
-                let basic_blocks = body.basic_blocks();
+                let basic_blocks = &body.basic_blocks;
                 let mut indirect_call_args = HashSet::new();
                 for call_site in fwd_cfg.get_call_sites_within(method) {
                     let bdd = &basic_blocks[call_site.basic_block.unwrap()];
@@ -636,7 +647,7 @@ impl AnalysisCallbacks {
                     }
 
                     if Self::related_to(tcx, &deref_ty, &state_tys) {
-                        if !state_tys.contains(deref_ty) {
+                        if !state_tys.contains(&deref_ty) {
                             report_err!();
                         }
                     }
@@ -683,7 +694,8 @@ impl AnalysisCallbacks {
                                 .chain(&[curr_method])
                                 .map(|method| {
                                     if let Some(ident) = tcx.opt_item_name(method.def_id) {
-                                        let fn_name = String::from(ident.name.as_str().deref());
+                                        //let fn_name = String::from(ident.name.as_str().deref());
+                                        let fn_name = String::from(ident.as_str().deref());
                                         if method.substs.is_empty() {
                                             fn_name
                                         } else {
@@ -789,7 +801,7 @@ impl AnalysisCallbacks {
             .collect::<Vec<_>>();
         debug_assert!(constructor.len() == 1);
         let constructor = constructor[0];
-        self.analyze_uninitialized_states(tcx, constructor, &fwd_cfg, storage_ty, compiler);
+        self.analyze_uninitialized_states(tcx, constructor, &fwd_cfg, storage_ty, compiler);//
 
         let (mut_methods, imm_methods): (Vec<_>, Vec<_>) = entry_points
             .iter()
@@ -806,8 +818,8 @@ impl AnalysisCallbacks {
                     Either::Right(i)
                 }
             });
-        self.detect_mutable_invocations(tcx, &fwd_cfg, imm_methods, &external_methods, compiler);
-        self.analyze_conflict_fields(&mut_methods, &external_methods, tcx, &fwd_cfg, storage_ty);
+        self.detect_mutable_invocations(tcx, &fwd_cfg, imm_methods, &external_methods, compiler);//
+        self.analyze_conflict_fields(&mut_methods, &external_methods, tcx, &fwd_cfg, storage_ty);//
     }
 
     fn collect_method_attrs<'tcx>(
@@ -816,7 +828,7 @@ impl AnalysisCallbacks {
         let mut contract_methods = HashMap::new();
         let mut external_methods = HashMap::new();
 
-        for local_def_id in tcx.body_owners() {
+        for local_def_id in tcx.hir().body_owners(){     //modify: tcx.body_owners()
             let def_id = local_def_id.to_def_id();
             match Self::get_method_info(tcx, def_id) {
                 Some(Left(method_info)) => {
@@ -845,6 +857,7 @@ impl AnalysisCallbacks {
         // `Body` is the lowered representation of a single function.
         let body = tcx.optimized_mir(def_id);
         let parent_id = tcx.parent(def_id);
+        let parent_id = Some(parent_id);   //modify: add this line :make parent_id being option
         if parent_id.is_none() {
             return None;
         }
@@ -863,14 +876,14 @@ impl AnalysisCallbacks {
         let parent_type = tcx.type_of(parent_id);
         if let TyKind::Adt(adt_def, ..) = parent_type.kind() {
             let def_path_suffix = tcx
-                .def_path(adt_def.did)
+                .def_path(adt_def.did())
                 .data
                 .iter()
                 .rev()
                 .take(3)
                 .filter_map(|disambiguated_def_path_data| {
                     if let DefPathData::TypeNs(symbol) = disambiguated_def_path_data.data {
-                        Some(symbol.as_str())
+                        Some(symbol.to_string())
                     } else {
                         None
                     }
@@ -888,13 +901,16 @@ impl AnalysisCallbacks {
                 {
                     match self_kind {
                         ImplicitSelfKind::MutRef => true,
+                        //adjustment::Adjustment::MutRef => true,
                         _ => false,
+                        //adjustment::Adjustment::MutRef => true,
                     }
                 } else {
                     false
                 }
             };
-            if def_path_suffix == STORAGE_NS {
+            let STORAGE_NS_STRING = STORAGE_NS.iter().map(|s|s.to_string()).collect::<Vec<String>>();
+            if def_path_suffix == STORAGE_NS_STRING {
                 let visible = tcx.visibility(def_id) == Visibility::Public;
                 let mutable = is_mutable(body);
                 return Some(Left(MethodAttr {
@@ -903,7 +919,8 @@ impl AnalysisCallbacks {
                     name,
                 }));
             }
-            if def_path_suffix == INTERFACE_NS && name != "at" {
+            let INTERFACE_NS_STRING = INTERFACE_NS.iter().map(|s|s.to_string()).collect::<Vec<String>>();
+            if def_path_suffix == INTERFACE_NS_STRING && name != "at" {
                 let mutable = is_mutable(body);
                 return Some(Right(MethodAttr {
                     mutable,

@@ -51,6 +51,7 @@ struct CallSite {
     callee: MethodIndex,
 }
 
+
 pub struct AndersonPFG<'cfg, 'tcx> {
     tcx: TyCtxt<'tcx>,
     cfg: &'cfg ForwardCFG<'tcx>,
@@ -134,7 +135,7 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
         let nodes = self.cfg.get_nodes_of(method);
         let def_id = method.def_id;
         let body = self.tcx.optimized_mir(def_id);
-        let basic_blocks = body.basic_blocks();
+        let basic_blocks = &body.basic_blocks;// TODO: jieyong wenti basic block not impl clone or copy
         let local_decls = &body.local_decls;
         self.tmp_var_id = body.local_decls.len();
 
@@ -195,7 +196,9 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
                             callee,
                             def_id,
                             &args,
-                            destination.and_then(|dest| Some(dest.0)),
+                            //destination.and_then(|dest| Some(dest.0)),  // modify 12 cannot modify
+                            Some(*destination), 
+                            //destination.as_ref().map(|dest| Some(dest.0)),
                         );
                     } else {
                         unreachable!("terminator kind of calling node should be `Call`");
@@ -221,7 +224,7 @@ impl<'cfg, 'tcx> AndersonPFG<'cfg, 'tcx> {
 
     fn is_related_to_sv(&self, ty: Ty<'tcx>) -> bool {
         let ret = match ty.kind() {
-            TyKind::Ref(_, ty, _) => self.is_related_to_sv(ty),
+            TyKind::Ref(_, ty, _) => self.is_related_to_sv(*ty),
             TyKind::RawPtr(type_and_mut) => self.is_related_to_sv(type_and_mut.ty),
             _ => self.sv_tys.contains(&ty),
         };

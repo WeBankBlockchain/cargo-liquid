@@ -2,6 +2,8 @@
 
 use liquid::{storage, InOut};
 use liquid_lang as liquid;
+//use std::dbg;
+//use log::info;
 
 #[liquid::contract]
 mod contract {
@@ -36,9 +38,15 @@ mod contract {
     impl Contract {
         pub fn new(&mut self) {
             self.val_container.initialize(0);
+            //println!("------------------TEST1{:?}",val_container);
+            //dbg!(val_container);
 
             self.env_address.initialize();
+            //dbg!(env_address);
+            //println!("------------------TEST2{:?}",env_address);
             self.env_timestamp.initialize();
+            //dbg!(env_timestamp);
+            //println!("------------------TEST3{:?}",env_timestamp);
             self.env_u64.initialize();
 
             self.constant_u128.initialize();
@@ -50,11 +58,11 @@ mod contract {
 
         // test cases for kind 0
         pub fn visit_val_container(&mut self) {
-            self.val_container.set(0);
-        }
+             self.val_container.set(0);
+         }
 
-        // test cases for kind 1
-        pub fn change_complex_data_structure(&mut self) {
+         // test cases for kind 1
+         pub fn change_complex_data_structure(&mut self) {
             let child = Child {
                 year: 8,
                 name: String::from("child"),
@@ -65,6 +73,9 @@ mod contract {
         // test cases for kind 2
         pub fn test_env_caller(&mut self) {
             self.env_address.get(&self.env().get_caller());
+            // println!("{:?}",ret);
+            //self.env().emit_event("env_address", &self.env_address);
+           // info!("------------------TEST1{:?}", self.env_address);
         }
         pub fn test_env_tx_origin(&mut self) {
             self.env_address.get(&self.env().get_tx_origin());
@@ -106,7 +117,12 @@ mod contract {
                 self.env_address.get(&self.env().get_tx_origin());
             } else {
                 self.env_address.get(&self.env().get_caller());
+                //self.emit_event("EnvAddress", &self.env_address);
             }
         }
+
+       // fn emit_event<T: liquid_abi::TypeInfo>(&mut self, event_name: &str, data: &T) {
+        //    liquid_lang::emit_event(event_name, data);
+       // }
     }
 }

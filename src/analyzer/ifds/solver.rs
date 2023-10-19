@@ -16,6 +16,7 @@ use std::{
 /// For now we only concern IFDS problems, hence we don't implement `EdgeFunction`
 /// in a generic way and only consider binary domain.
 #[derive(PartialEq, Eq, Copy, Clone)]
+#[derive(Debug)]
 pub enum EdgeFunction {
     /// This edge function maps every input to the stated bottom element. `AllBottom` is
     /// normally useful only in the context of an IFDS solver, which uses `AllBottom` to
@@ -247,7 +248,6 @@ where
     // TODO: Processes edges in concurrent threads to improve performance.
     pub fn solve(&mut self) {
         let initial_seeds = self.problem.initial_seeds();
-
         let zero_value = self.zero_value.clone();
         for (sp, facts_at_sp) in &initial_seeds {
             for fact_at_sp in facts_at_sp {
@@ -265,7 +265,7 @@ where
                 EdgeFunction::Identity,
             )
         }
-
+self.jump_functions.non_empty_forward_lookup);
         for (sp, facts_at_sp) in &initial_seeds {
             for fact_at_sp in facts_at_sp {
                 self.set_value(
@@ -276,7 +276,6 @@ where
                 self.propagate_value(sp.clone(), fact_at_sp.clone(), &initial_seeds);
             }
         }
-
         let non_call_or_start_nodes = self.icfg.get_non_call_and_start_nodes();
         let mut final_value = vec![];
         for node in non_call_or_start_nodes {
@@ -298,7 +297,7 @@ where
         for (node, fact, value) in final_value {
             self.set_value(node, fact, value);
         }
-
+ 
         debug!("all values after solved:");
         for (node, facts_and_values) in &self.values {
             debug!(
@@ -310,6 +309,9 @@ where
                 debug!("\tfact: `{:?}`, value: `{:?}`", fact, value);
             }
         }
+        
+
+
     }
 
     fn zeroed_results(
@@ -710,11 +712,11 @@ where
     ) {
         let mut new_tasks = vec![];
         if self.icfg.is_start_point(&node) || initial_seeds.contains_key(&node) {
-            let method = self.icfg.get_method_of(&node);
+            let method = self.icfg.get_method_of(&node); 
             for call_site in self.icfg.get_call_sites_within(&method) {
                 let facts_and_jump_fns = self.jump_functions.forward_lookup(&fact, call_site);
-                if let Some(facts_and_jump_fns) = facts_and_jump_fns {
-                    for (fact_at_call_site, jump_fn) in facts_and_jump_fns {
+                if let Some(facts_and_jump_fns_) = facts_and_jump_fns {
+                    for (fact_at_call_site, jump_fn) in facts_and_jump_fns_ {
                         let value =
                             jump_fn.compute_target(self.get_value(node.clone(), fact.clone()));
                         new_tasks.push((call_site.clone(), fact_at_call_site.clone(), value));
@@ -743,7 +745,6 @@ where
                 }
             }
         }
-
         for (node, fact, value) in new_tasks {
             self.propagate_new_value(node, fact, value, initial_seeds);
         }

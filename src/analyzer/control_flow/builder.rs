@@ -1,3 +1,4 @@
+#![feature(rustc_private)]
 use crate::{
     control_flow::{
         cfg::{CallSite, Edge, EdgeKind, ForwardCFG, Method, Node, NodeKind},
@@ -7,33 +8,291 @@ use crate::{
 };
 use either::*;
 use log::*;
-use rustc_hir::Constness;
+//use rustc_hir::Constness;
+//use rustc_middle::ty::TyCtxtExt;
+//use rustc_middle::ty::context::TyCtxtExt;
+
 use rustc_infer::{
-    infer::InferCtxt,
+    //infer::InferCtxt,
+    infer::{InferCtxt, TyCtxtInferExt}, //InferOk
     traits::{FulfillmentErrorCode, Obligation, ObligationCause},
 };
+use rustc_middle::ty::subst::{GenericArg, GenericArgKind, InternalSubsts, SubstsRef};
+use rustc_middle::ty::Clause; //modify 04-2
+use rustc_middle::ty::{GlobalCtxt, TyCtxt}; //TyCtxt,  modify
 use rustc_middle::{
     mir::{
         self,
-        terminator::{Terminator, TerminatorKind},
-        BasicBlockData, Body, START_BLOCK,
+        *, //self,
+           //terminator::{Terminator, TerminatorKind},
+           //BasicBlockData, Body, START_BLOCK,
     },
     ty::{
         error::TypeError,
-        subst::{GenericArg, GenericArgKind, InternalSubsts, Subst, SubstsRef},
-        AssocKind, GenericPredicates, Instance, InstanceDef, ParamEnv, PredicateKind, ToPredicate,
-        TraitPredicate, TraitRef, TyCtxt, TyKind, TypeAndMut,
+        //subst::{GenericArg, GenericArgKind, InternalSubsts, SubstsRef},//Substs,  modify PredicateKind,
+        AssocKind,
+        GenericPredicates,
+        Instance,
+        InstanceDef,
+        ParamEnv,
+        Predicate,
+        PredicateKind,
+        ToPredicate,
+        TraitPredicate,
+        TraitRef,
+        TyKind,
+        TypeAndMut,
     },
-};
+}; //Substs
+   //use  rustc_middle::ty::AliasKind;    //modify 04-1
+use rustc_middle::bug;
+use rustc_middle::ty;
+use rustc_middle::ty::*;
+//use std::ops::Deref;
+//use rustc_middle::ty::subst::Substs;    //modify delete this line
+
 use rustc_span::def_id::DefId;
-use rustc_trait_selection::{
-    infer::TyCtxtInferExt,
-    traits::{FulfillmentContext, TraitEngine},
-};
+use rustc_trait_selection::traits::{FulfillmentContext, TraitEngine, TraitEngineExt};
 use std::{
+    any::type_name, //env::home_dir,
     collections::{HashMap, HashSet, LinkedList},
     iter::FromIterator,
 };
+
+//use std::ops::Deref;
+
+struct SubstFolder<'a, 'tcx> {
+    tcx: TyCtxt<'tcx>,
+    substs: &'a [GenericArg<'tcx>],
+
+    /// Number of region binders we have passed through while doing the substitution
+    binders_passed: u32,
+}
+
+impl<'a, 'tcx> TypeFolder<'tcx> for SubstFolder<'a, 'tcx> {
+    #[inline]
+    fn tcx<'b>(&'b self) -> TyCtxt<'tcx> {
+        self.tcx
+    }
+
+    fn fold_binder<T: TypeFoldable<'tcx>>(
+        &mut self,
+        t: ty::Binder<'tcx, T>,
+    ) -> ty::Binder<'tcx, T> {
+        self.binders_passed += 1;
+        let t = t.super_fold_with(self);
+        self.binders_passed -= 1;
+        t
+    }
+
+    fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
+        #[cold]
+        #[inline(never)]
+        fn region_param_out_of_range(data: ty::EarlyBoundRegion, substs: &[GenericArg<'_>]) -> ! {
+            bug!(
+                "Region parameter out of range when substituting in region {} (index={}, substs = {:?})",
+                data.name,
+                data.index,
+                substs,
+            )
+        }
+
+        #[cold]
+        #[inline(never)]
+        fn region_param_invalid(data: ty::EarlyBoundRegion, other: GenericArgKind<'_>) -> ! {
+            bug!(
+                "Unexpected parameter {:?} when substituting in region {} (index={})",
+                other,
+                data.name,
+                data.index
+            )
+        }
+
+        // Note: This routine only handles regions that are bound on
+        // type declarations and other outer declarations, not those
+        // bound in *fn types*. Region substitution of the bound
+        // regions that appear in a function signature is done using
+        // the specialized routine `ty::replace_late_regions()`.
+        match *r {
+            ty::ReEarlyBound(data) => {
+                let rk = self.substs.get(data.index as usize).map(|k| k.unpack());
+                match rk {
+                    Some(GenericArgKind::Lifetime(lt)) => self.shift_region_through_binders(lt),
+                    Some(other) => region_param_invalid(data, other),
+                    None => region_param_out_of_range(data, self.substs),
+                }
+            }
+            _ => r,
+        }
+    }
+
+    fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
+        if !t.needs_subst() {
+            return t;
+        }
+
+        match *t.kind() {
+            ty::Param(p) => self.ty_for_param(p, t),
+            _ => t.super_fold_with(self),
+        }
+    }
+
+    fn fold_const(&mut self, c: ty::Const<'tcx>) -> ty::Const<'tcx> {
+        if let ty::ConstKind::Param(p) = c.kind() {
+            self.const_for_param(p, c)
+        } else {
+            c.super_fold_with(self)
+        }
+    }
+}
+
+impl<'a, 'tcx> SubstFolder<'a, 'tcx> {
+    fn ty_for_param(&self, p: ty::ParamTy, source_ty: Ty<'tcx>) -> Ty<'tcx> {
+        // Look up the type in the substitutions. It really should be in there.
+        let opt_ty = self.substs.get(p.index as usize).map(|k| k.unpack());
+        let ty = match opt_ty {
+            Some(GenericArgKind::Type(ty)) => ty,
+            Some(kind) => self.type_param_expected(p, source_ty, kind),
+            None => self.type_param_out_of_range(p, source_ty),
+        };
+
+        self.shift_vars_through_binders(ty)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn type_param_expected(&self, p: ty::ParamTy, ty: Ty<'tcx>, kind: GenericArgKind<'tcx>) -> ! {
+        bug!(
+            "expected type for `{:?}` ({:?}/{}) but found {:?} when substituting, substs={:?}",
+            p,
+            ty,
+            p.index,
+            kind,
+            self.substs,
+        )
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn type_param_out_of_range(&self, p: ty::ParamTy, ty: Ty<'tcx>) -> ! {
+        bug!(
+            "type parameter `{:?}` ({:?}/{}) out of range when substituting, substs={:?}",
+            p,
+            ty,
+            p.index,
+            self.substs,
+        )
+    }
+
+    fn const_for_param(&self, p: ParamConst, source_ct: ty::Const<'tcx>) -> ty::Const<'tcx> {
+        // Look up the const in the substitutions. It really should be in there.
+        let opt_ct = self.substs.get(p.index as usize).map(|k| k.unpack());
+        let ct = match opt_ct {
+            Some(GenericArgKind::Const(ct)) => ct,
+            Some(kind) => self.const_param_expected(p, source_ct, kind),
+            None => self.const_param_out_of_range(p, source_ct),
+        };
+
+        self.shift_vars_through_binders(ct)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn const_param_expected(
+        &self,
+        p: ty::ParamConst,
+        ct: ty::Const<'tcx>,
+        kind: GenericArgKind<'tcx>,
+    ) -> ! {
+        bug!(
+            "expected const for `{:?}` ({:?}/{}) but found {:?} when substituting substs={:?}",
+            p,
+            ct,
+            p.index,
+            kind,
+            self.substs,
+        )
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn const_param_out_of_range(&self, p: ty::ParamConst, ct: ty::Const<'tcx>) -> ! {
+        bug!(
+            "const parameter `{:?}` ({:?}/{}) out of range when substituting substs={:?}",
+            p,
+            ct,
+            p.index,
+            self.substs,
+        )
+    }
+
+    /// It is sometimes necessary to adjust the De Bruijn indices during substitution. This occurs
+    /// when we are substituting a type with escaping bound vars into a context where we have
+    /// passed through binders. That's quite a mouthful. Let's see an example:
+    ///
+    /// ```
+    /// type Func<A> = fn(A);
+    /// type MetaFunc = for<'a> fn(Func<&'a i32>);
+    /// ```
+    ///
+    /// The type `MetaFunc`, when fully expanded, will be
+    /// ```ignore (illustrative)
+    /// for<'a> fn(fn(&'a i32))
+    /// //      ^~ ^~ ^~~
+    /// //      |  |  |
+    /// //      |  |  DebruijnIndex of 2
+    /// //      Binders
+    /// ```
+    /// Here the `'a` lifetime is bound in the outer function, but appears as an argument of the
+    /// inner one. Therefore, that appearance will have a DebruijnIndex of 2, because we must skip
+    /// over the inner binder (remember that we count De Bruijn indices from 1). However, in the
+    /// definition of `MetaFunc`, the binder is not visible, so the type `&'a i32` will have a
+    /// De Bruijn index of 1. It's only during the substitution that we can see we must increase the
+    /// depth by 1 to account for the binder that we passed through.
+    ///
+    /// As a second example, consider this twist:
+    ///
+    /// ```
+    /// type FuncTuple<A> = (A,fn(A));
+    /// type MetaFuncTuple = for<'a> fn(FuncTuple<&'a i32>);
+    /// ```
+    ///
+    /// Here the final type will be:
+    /// ```ignore (illustrative)
+    /// for<'a> fn((&'a i32, fn(&'a i32)))
+    /// //          ^~~         ^~~
+    /// //          |           |
+    /// //   DebruijnIndex of 1 |
+    /// //               DebruijnIndex of 2
+    /// ```
+    /// As indicated in the diagram, here the same type `&'a i32` is substituted once, but in the
+    /// first case we do not increase the De Bruijn index and in the second case we do. The reason
+    /// is that only in the second case have we passed through a fn binder.
+    fn shift_vars_through_binders<T: TypeFoldable<'tcx>>(&self, val: T) -> T {
+        debug!(
+            "shift_vars(val={:?}, binders_passed={:?}, has_escaping_bound_vars={:?})",
+            val,
+            self.binders_passed,
+            val.has_escaping_bound_vars()
+        );
+
+        if self.binders_passed == 0 || !val.has_escaping_bound_vars() {
+            return val;
+        }
+
+        let result = ty::fold::shift_vars(TypeFolder::tcx(self), val, self.binders_passed);
+        debug!("shift_vars: shifted result = {:?}", result);
+
+        result
+    }
+
+    fn shift_region_through_binders(&self, region: ty::Region<'tcx>) -> ty::Region<'tcx> {
+        if self.binders_passed == 0 || !region.has_escaping_bound_vars() {
+            return region;
+        }
+        ty::fold::shift_region(self.tcx, region, self.binders_passed)
+    }
+}
 
 #[derive(PartialEq, Eq, Hash, Debug)]
 struct VirtualCallee<'tcx> {
@@ -66,7 +325,38 @@ impl<'tcx> VirtualCallContext<'tcx> {
     }
 }
 
+//let subst = Substs::build_for_def(tcx, generics, &[]);
+//static Substs: SubstsRef<'static> = &Substs::build_for_def(tcx, generics, &[]);
+
+//pub trait AsGlobalCtxt<'tcx>: AsRef<GlobalCtxt<'tcx>> {}
+
+//impl<'tcx, T: AsRef<GlobalCtxt<'tcx>>> AsGlobalCtxt<'tcx> for T {}
+
+//impl<'tcx> AsRef<GlobalCtxt<'tcx>> for TyCtxtObject<'tcx> {
+//    fn as_ref(&self) -> &GlobalCtxt<'tcx> {
+//     self.global_tcx()
+//    }
+//}
+// fn enter<'tcx, F, R>(&'tcx GlobalCtxt<'tcx> gl, f: F) -> R
+//     where
+//         F: FnOnce(TyCtxt<'tcx>) -> R,
+//     {
+//         let icx = tls::ImplicitCtxt::new(gl);
+//         tls::enter_context(&icx, || f(icx.tcx))
+//     }
+
+//FnOnce
+#[feature(unboxed_closures)]
+//impl<'tcx, R:FnOnce> VirtualCallee<'tcx> {
 impl<'tcx> VirtualCallee<'tcx> {
+    // fn enter< F, R>(& GlobalCtxt<'tcx> gl, f: F) -> R
+    // where
+    //     F: FnOnce(TyCtxt<'tcx>) -> R,
+    // {
+    //     let icx = tls::ImplicitCtxt::new(gl);
+    //     tls::enter_context(&icx, || f(icx.tcx))
+    // }
+
     fn probe_possible_callees(
         &self,
         tcx: TyCtxt<'tcx>,
@@ -79,7 +369,7 @@ impl<'tcx> VirtualCallee<'tcx> {
             let impl_kind = tcx.type_of(impl_id).kind();
             match impl_kind {
                 TyKind::Adt(adt_def, adt_substs) => {
-                    let adt_id = adt_def.did;
+                    let adt_id = adt_def.did();
                     let substs_set = substs_infos.get(&adt_id);
                     if substs_set.is_none() {
                         continue;
@@ -129,91 +419,145 @@ impl<'tcx> VirtualCallee<'tcx> {
                                 }
                             });
                         let impl_trait_ref = tcx.impl_trait_ref(impl_id).unwrap();
+                        //let gcx_ref: &GlobalCtxt<'tcx> = tcx.gcx;
 
-                        tcx.infer_ctxt().enter(|infcx| {
-                            let mut fulfill_cx = FulfillmentContext::new();
-                            let revised_impl_trait_substs = impl_trait_ref
-                                .substs
-                                .iter()
-                                .take(1)
-                                .chain(self.substs.iter().skip(1))
-                                .collect::<Vec<_>>();
+                        //tcx.as_ref().enter(|infcx| {             // cannot modify 01
+                        // (*tcx).enter(|tcx| {
+                        //tcx.clone().enter(|infcx| {
 
-                            let trait_ref = TraitRef::from_method(
-                                tcx,
-                                self.trait_id,
-                                tcx.intern_substs(&revised_impl_trait_substs),
-                            );
-                            let trait_predicate = PredicateKind::Trait(
-                                TraitPredicate { trait_ref },
-                                // A const trait bound looks like:
-                                // ```
-                                // struct Foo<Bar> where Bar: const Baz { ... }
-                                // ```
-                                // For now we don't take this situation into consideration.
-                                Constness::NotConst,
-                            )
-                            .to_predicate(tcx);
+                        // fn enter<'tcx, F, R>(&'tcx GlobalCtxt<'tcx> gl, f: F) -> R
+                        // where
+                        //     F: FnOnce(TyCtxt<'tcx>) -> R,
+                        // {
+                        //     let icx = tls::ImplicitCtxt::new(gl);
+                        //     tls::enter_context(&icx, || f(icx.tcx))
+                        // }
 
-                            let trait_predicate = trait_predicate.subst(tcx, rebased_substs);
-                            let obligation = Obligation::new(
-                                ObligationCause::dummy(),
-                                param_env,
-                                trait_predicate,
-                            );
+                        //定义了一个名为 enter_fn 的闭包，它接受两个参数：一个 GlobalCtxt 的引用和一个函数 f。
+                        //这个闭包创建了一个 ImplicitCtxt，然后使用 tls::enter_context 函数在 ImplicitCtxt 的上下文中调用函数 f
+                        // let enter_fn = |t_tcx: &GlobalCtxt<'tcx>, f|{
+                        //         //
+                        //         let icx = tls::ImplicitCtxt::new(t_tcx);
+                        //         tls::enter_context(&icx, || f(icx.tcx))
+                        // };
+                        // let icx_temp = tls::ImplicitCtxt::new( *tcx );
+                        // let tcx_temp = icx_temp.tcx;
 
-                            fulfill_cx.register_predicate_obligation(&infcx, obligation.clone());
-                            // Drives compiler to do type checking and constraint solving.
-                            if let Err(err) = fulfill_cx.select_all_or_error(&infcx) {
-                                debug!(
-                                    "candidate selecting failed: `{:?}` doesn't implements `{:?}`, due to `{:?}`",
-                                    trait_ref.substs, trait_ref.def_id, err
-                                );
-                            } else {
-                                let predicates = tcx.predicates_of(impl_id);
-                                predicates.predicates.iter().for_each(|(predicate, _)| {
-                                    let kind = predicate.kind().skip_binder();
-                                    match kind {
-                                        PredicateKind::Trait(..) | PredicateKind::Projection(..) => (),
-                                        unknown => todo!("unknown predicate kind `{:?}`", unknown),
-                                    }
-                                });
+                        //tcx.infer_ctxt().enter(|infcx| // tcx TyCtxt, infer_ctxt ,enter(||),infcx InferCtxt,
+                        // let mut enter_func = || { //ImplicitCtxt
+                        // };
+                        // enter_func();
 
-                                let assoc_items = tcx.associated_items(impl_id);
-                                let target_name = tcx.item_name(self.trait_fn);
-                                let mut assoc_fn = assoc_items.in_definition_order().filter_map(|assoc_item| {
-                                    if assoc_item.kind == AssocKind::Fn && assoc_item.ident.name == target_name {
+                        let infcx = tcx.infer_ctxt().build();
+
+                        let mut fulfill_cx = <dyn TraitEngine<'tcx>>::new(infcx.tcx); // cannot modify 02 ???
+                        
+                        //let mut fulfill_cx = FulfillmentContext::new(); //modify:
+                      
+
+                        let revised_impl_trait_substs = impl_trait_ref
+                            .substs
+                            .iter()
+                            .take(1)
+                            .chain(self.substs.iter().skip(1))
+                            .collect::<Vec<_>>();
+
+                        let trait_ref = TraitRef::from_method(
+                            tcx,
+                            self.trait_id,
+                            tcx.intern_substs(&revised_impl_trait_substs),
+                        );
+                        let trait_predicate: Predicate<'tcx> =
+                            Clause::Trait(TraitPredicate {
+                                trait_ref,
+                                polarity: rustc_middle::ty::ImplPolarity::Positive,
+                                constness: rustc_middle::ty::BoundConstness::NotConst,
+                            }).to_predicate(tcx);
+                        // let trait_predicate = trait_predicate.subst(tcx, rebased_substs);//
+
+                        let mut folder = SubstFolder {
+                            tcx,
+                            substs: rebased_substs,
+                            binders_passed: 0,
+                        }; // TODO*: find or write(create) a Folder struct to substitute the SubstFolder,
+                        let trait_predicate = trait_predicate.fold_with(&mut folder);
+                        //println!("*******debug trait engine:{:?}", fulfill_cx);
+
+                        //if let Result::Ok(trait_predicate) = fold_result {
+                        
+                        let obligation = Obligation::new(
+                            //TyCtxt<'_'>,
+                            tcx,
+                            ObligationCause::dummy(),
+                            param_env,
+                            trait_predicate,
+                        );
+                        fulfill_cx.register_predicate_obligation(&infcx, obligation.clone());
+                        println!("fulfill_cx registering oredicate");
+                        // Drives compiler to do type checking and constraint solving.
+                        //Vec<FulfillmentError<'tcx>, Global>
+                        let fullfillcx_errs = fulfill_cx.select_all_or_error(&infcx); //
+
+                        if fullfillcx_errs.len() > 0 {
+                            //modify 05
+                            //let errors: Vec<_> = err.into_iter().collect();
+
+                            debug!(
+                                            "candidate selecting failed: `{:?}` doesn't implements `{:?}`, due to `{:?}`",
+                                            trait_ref.substs, trait_ref.def_id, fullfillcx_errs[0] //
+                                        );
+                        } else {
+
+                            let predicates = tcx.predicates_of(impl_id);
+                            predicates.predicates.iter().for_each(|(predicate, _)| {
+                                let kind = predicate.kind().skip_binder();
+                                match kind {
+                                    // Clause::Trait(..) | Clause::Projection(..) => (),   ///modify 06
+                                    //PredicateKind::Trait(..) | PredicateKind::Projection(..) => (),
+                                    PredicateKind::Clause(Clause::Trait(..))
+                                    | PredicateKind::Clause(Clause::Projection(..)) => (),
+                                    unknown => todo!("unknown predicate kind `{:?}`", unknown),
+                                }
+                            });
+
+                            let assoc_items = tcx.associated_items(impl_id);
+                            let target_name = tcx.item_name(self.trait_fn);
+                            let mut assoc_fn =
+                                assoc_items.in_definition_order().filter_map(|assoc_item| {
+                                    if assoc_item.kind == AssocKind::Fn
+                                        && assoc_item.ident(tcx).name == target_name
+                                    {
                                         Some(assoc_item.def_id)
                                     } else {
                                         None
                                     }
                                 });
 
-                                let instantiate_substs = Self::instantiate_proj_substs(
-                                    tcx,
-                                    predicates,
-                                    rebased_substs,
-                                    param_env,
-                                    &mut fulfill_cx,
-                                    &infcx,
-                                );
+                            let instantiate_substs = Self::instantiate_proj_substs(
+                                tcx,
+                                predicates,
+                                rebased_substs,
+                                param_env,
+                                &mut fulfill_cx,
+                                &infcx,
+                            );
 
-                                if let Some(def_id) = assoc_fn.next() {
-                                    // In Rust, `Clone` trait is not object-safe because the 
-                                    // signature of its clone method returns `Self`, so we are
-                                    // very sure that it cannot be used in trait object.
-                                    candidates.push(Method {
-                                        def_id,
-                                        substs: tcx.mk_substs(instantiate_substs.iter()),
-                                        self_ty: None,
-                                        used_for_clone: false,
-                                    })
-                                } else {
-                                    todo!("default impl");
-                                }
-                                context.add_processed_adt_substs(adt_id, substs);
+                            if let Some(def_id) = assoc_fn.next() {
+                                // In Rust, `Clone` trait is not object-safe because the
+                                // signature of its clone method returns `Self`, so we are
+                                // very sure that it cannot be used in trait object.
+                                candidates.push(Method {
+                                    def_id,
+                                    substs: tcx.mk_substs(instantiate_substs.iter()),
+                                    self_ty: None,
+                                    used_for_clone: false,
+                                })
+                            } else {
+                                todo!("default impl");
                             }
-                        });
+                            context.add_processed_adt_substs(adt_id, substs);
+                        }
+                        
                     }
                 }
                 _ => todo!("unknown impl kind: {:?}", impl_kind),
@@ -227,8 +571,9 @@ impl<'tcx> VirtualCallee<'tcx> {
         predicates: GenericPredicates<'tcx>,
         substs: SubstsRef<'tcx>,
         param_env: ParamEnv<'tcx>,
-        fulfill_cx: &mut FulfillmentContext<'tcx>,
-        infcx: &InferCtxt<'_, 'tcx>,
+        fulfill_cx: &mut std::boxed::Box<dyn TraitEngine<'tcx>>, //
+        //infcx: &InferCtxt<'_, 'tcx>,
+        infcx: &InferCtxt<'tcx>,
     ) -> Vec<GenericArg<'tcx>> {
         let mut instantiated_substs = Vec::from_iter(substs);
         loop {
@@ -238,12 +583,19 @@ impl<'tcx> VirtualCallee<'tcx> {
 
             let mut substituted = false;
             for predicate in predicates {
-                if let PredicateKind::Projection(..) = predicate.kind().skip_binder() {
+                //if let PredicateKind::Projection(..) = predicate.kind().skip_binder() {   // modify 07  cannot modify
+                if let rustc_middle::ty::PredicateKind::Clause(Clause::Projection(..)) =
+                    predicate.kind().skip_binder()
+                {
+                    //if let Clause::Projection(..) = predicate.kind().skip_binder() {
+
+                    //if let AliasKind::Projection(..) = predicate.kind().skip_binder() { Clause::Projection
                     let obligation =
-                        Obligation::new(ObligationCause::dummy(), param_env, predicate);
+                        Obligation::new(tcx, ObligationCause::dummy(), param_env, predicate);
                     fulfill_cx.register_predicate_obligation(&infcx, obligation);
-                    let select_result = fulfill_cx.select_all_or_error(&infcx);
-                    if let Err(errors) = select_result {
+                    let errors = fulfill_cx.select_all_or_error(&infcx); //Vec<rustc_trait_selection::traits::FulfillmentError<'_>>
+                    if errors.len() > 0 {
+                        // modify 08 cannot modify    -----------------------
                         debug_assert!(errors.len() == 1);
                         let code = &errors[0].code;
                         if let FulfillmentErrorCode::CodeProjectionError(mismatched_proj) = code {
@@ -387,7 +739,7 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
             }
 
             let body = self.tcx.optimized_mir(def_id);
-            let basic_blocks = body.basic_blocks();
+            let basic_blocks = &body.basic_blocks;
             let mut bb_to_index = HashMap::new();
             let normal_edge = Edge {
                 container: Some(*method),
@@ -502,13 +854,14 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
             }
 
             let body = self.tcx.optimized_mir(def_id);
-            let basic_blocks = body.basic_blocks();
+            let basic_blocks = &body.basic_blocks;
             for bb in basic_blocks.indices() {
                 let BasicBlockData { ref terminator, .. } = basic_blocks[bb];
                 if let Some(terminator) = terminator {
                     match terminator.kind {
                         TerminatorKind::Call {
-                            destination,
+                            //destination,
+                            target,
                             cleanup,
                             ..
                         } => {
@@ -554,7 +907,9 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
                                 kind: EdgeKind::CallToReturn,
                                 is_certain: true,
                             };
-                            if let Some((_, dest)) = destination {
+
+                            if let Some(dest) = target {
+                                // Option<_,_>     // modify 09 cannot sure // destination -> target
                                 let dest_index = self.cfg.node_to_index[&Node {
                                     basic_block: Some(dest),
                                     belongs_to: method_index,
@@ -605,7 +960,8 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
                                     let successors = terminator.kind.successors();
                                     for successor in successors {
                                         let succ_node = Node {
-                                            basic_block: Some(*successor),
+                                            //basic_block: Some(*successor),      // modify 10 cannot modify
+                                            basic_block: Some(successor),
                                             belongs_to: method_index,
                                             kind: NodeKind::Normal,
                                         };
@@ -644,7 +1000,7 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
 
                                 for successor in successors {
                                     let succ_node = Node {
-                                        basic_block: Some(*successor),
+                                        basic_block: Some(successor), // modify 11 cannot modify   same as 10
                                         belongs_to: method_index,
                                         kind: NodeKind::Normal,
                                     };
@@ -712,7 +1068,7 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
                         utils::generate_generic_args_map(self.tcx, method.def_id, method.substs);
                     let substs = utils::specialize_substs(self.tcx, substs, &map);
                     self.substs_cache
-                        .entry(adt_def.did)
+                        .entry(adt_def.did())
                         .or_default()
                         .insert(substs);
                 }
@@ -723,7 +1079,7 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
         let lang_items = self.tcx.lang_items();
         let clone_trait = lang_items.clone_trait();
 
-        for bb in body.basic_blocks().indices() {
+        for bb in body.basic_blocks.indices() {
             let BasicBlockData { ref terminator, .. } = body[bb];
 
             if let Some(terminator) = terminator {
@@ -799,7 +1155,7 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
                             generic_arg
                         }
                     }));
-                    callee.self_ty = Some(self.tcx.mk_adt(adt_def, substs));
+                    callee.self_ty = Some(self.tcx.mk_adt(*adt_def, substs));
                 }
                 TyKind::Param(param_ty) => {
                     let index = param_ty.index;
@@ -809,7 +1165,7 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
                     if let TyKind::Param(param_ty) = ty.kind() {
                         let index = param_ty.index;
                         callee.self_ty = Some(self.tcx.mk_ref(
-                            region,
+                            *region,
                             TypeAndMut {
                                 ty: callee.substs[index as usize].expect_ty(),
                                 mutbl: *mutbl,
