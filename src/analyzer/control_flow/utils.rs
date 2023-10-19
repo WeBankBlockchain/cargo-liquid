@@ -164,7 +164,6 @@ pub fn specialize_type_generic_arg<'tcx>(
         }
         // TODO: N1 List Type    modify 20230815
         TyKind::Tuple(substs) => {
-            //println!("111111111111111111");
             tcx.mk_tup(// substs: List<Ty>,
                 specialize_substs(
                     tcx, 

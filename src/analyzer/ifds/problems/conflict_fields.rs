@@ -153,9 +153,7 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                         fields,
                     });
             };
-        //println!("#####################basic_blocks: {:?}",basic_blocks);
         for bb in basic_blocks.indices() {
-            //  println!("@@@@bb: {:?}",bb);
             //  println!("@==@basic_blocks[bb]: {:?}",basic_blocks[bb]);
             let stmts = &basic_blocks[bb].statements;
             for stmt in stmts {
@@ -212,9 +210,6 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
             .into_engine(self.tcx, body)
             .iterate_to_fixpoint()
             .into_results_cursor(body);
-
-        //println!("=========results: {}",results);
-
         let mut maybe_mut_borrowed_in_method = HashSet::new();
         for bb in body.basic_blocks.indices() {
             results.seek_before_primary_effect(body.terminator_loc(bb));
@@ -619,10 +614,8 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
         &mut self,
     ) -> HashMap<<Self::Icfg as InterproceduralCFG>::Node, HashSet<Self::Fact>> {
         let entrance = self.icfg.get_method_by_index(self.entry_point);
-        //println!("------------------entrance{:?}",entrance);
         self.insert_var_defs(entrance);
         let start_points = self.icfg.get_start_points_of(entrance);
-        //println!("------------------SP{:?}",start_points);
         let mut initial_seeds: HashMap<_, _> = Default::default();
         for start_point in start_points {
             initial_seeds.insert(*start_point, HashSet::from_iter([Self::zero_value()]));

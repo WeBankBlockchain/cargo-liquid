@@ -248,8 +248,6 @@ where
     // TODO: Processes edges in concurrent threads to improve performance.
     pub fn solve(&mut self) {
         let initial_seeds = self.problem.initial_seeds();
-       // println!("=========initial seeds: {:?}",initial_seeds);
-
         let zero_value = self.zero_value.clone();
         for (sp, facts_at_sp) in &initial_seeds {
             for fact_at_sp in facts_at_sp {
@@ -267,8 +265,7 @@ where
                 EdgeFunction::Identity,
             )
         }
-        // TODO: print
-        //  println!("==========! non_empty_forward_lookup {:?}", self.jump_functions.non_empty_forward_lookup);
+self.jump_functions.non_empty_forward_lookup);
         for (sp, facts_at_sp) in &initial_seeds {
             for fact_at_sp in facts_at_sp {
                 self.set_value(
@@ -279,8 +276,6 @@ where
                 self.propagate_value(sp.clone(), fact_at_sp.clone(), &initial_seeds);
             }
         }
-       // println!("==========!// init seed: {:?}", initial_seeds);
-
         let non_call_or_start_nodes = self.icfg.get_non_call_and_start_nodes();
         let mut final_value = vec![];
         for node in non_call_or_start_nodes {
@@ -331,15 +326,12 @@ where
     }
 
     pub fn get_results_at(&self, node: &Icfg::Node) -> HashSet<Problem::Fact> {
-      //  println!("====================result node: {:?}",node);
         let mut results = HashSet::new();
         for (fact, _) in &self.values[node] {
             if fact != &self.zero_value {
                 results.insert(fact.clone());
             }
         }
-       // println!("{:?}",self.values);
-       // println!("====================result: {:?}",self.values[node]);
         results
     }
 
@@ -722,7 +714,6 @@ where
         if self.icfg.is_start_point(&node) || initial_seeds.contains_key(&node) {
             let method = self.icfg.get_method_of(&node); 
             for call_site in self.icfg.get_call_sites_within(&method) {
-               // println!("============*call site : {:?}",call_site);
                 let facts_and_jump_fns = self.jump_functions.forward_lookup(&fact, call_site);
                 if let Some(facts_and_jump_fns_) = facts_and_jump_fns {
                     for (fact_at_call_site, jump_fn) in facts_and_jump_fns_ {
@@ -754,7 +745,6 @@ where
                 }
             }
         }
-       // println!("====================new tasks:{:?}",new_tasks);
         for (node, fact, value) in new_tasks {
             self.propagate_new_value(node, fact, value, initial_seeds);
         }
