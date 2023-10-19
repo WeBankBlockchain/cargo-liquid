@@ -13,6 +13,8 @@ use std::{
     collections::{HashMap, HashSet},
     iter::FromIterator,
 };
+use std::fmt::Display;
+
 
 pub struct UninitializedStates<'tcx, 'icfg> {
     tcx: TyCtxt<'tcx>,

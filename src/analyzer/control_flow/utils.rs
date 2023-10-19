@@ -122,10 +122,11 @@ pub fn specialize_type_generic_arg<'tcx>(
             tcx.mk_adt(*def, specialize_substs(tcx, substs, generic_args_map))
         }
         TyKind::Array(elem_ty, len) => {
-            //let specialized_elem_ty = specialize_type_generic_arg(tcx, *elem_ty, generic_args_map);
+            //let specialized_elem_ty = specialize_type_generic_arg(tcx, elem_ty, generic_args_map);
+            //let specialized_len = specialize_const_generic_arg(len, generic_args_map);
             let specialized_elem_ty = specialize_type_generic_arg(tcx, *elem_ty, generic_args_map);
             let specialized_len = specialize_const_generic_arg(*len, generic_args_map); // ???
-            tcx.mk_ty(TyKind::Array(specialized_elem_ty, specialized_len)) // ???
+            tcx.mk_ty(TyKind::Array(specialized_elem_ty, specialized_len))
         }
         TyKind::Param(ParamTy { name, .. }) => {
             if let Some(generic_arg) = generic_args_map.get(name) {
@@ -134,6 +135,7 @@ pub fn specialize_type_generic_arg<'tcx>(
             ty
         }
         TyKind::Ref(region, ty, mutable) => {
+            // let specialized_ty = specialize_type_generic_arg(tcx, ty, generic_args_map);
             let specialized_ty = specialize_type_generic_arg(tcx, *ty, generic_args_map);
             tcx.mk_ref(
                 *region,
@@ -144,23 +146,42 @@ pub fn specialize_type_generic_arg<'tcx>(
             )
         }
         TyKind::Slice(elem_ty) => {
+            // let specialized_elem_ty = specialize_type_generic_arg(tcx, elem_ty, generic_args_map);
             let specialized_elem_ty = specialize_type_generic_arg(tcx, *elem_ty, generic_args_map);
             tcx.mk_slice(specialized_elem_ty)
         }
         TyKind::RawPtr(TypeAndMut { ty, mutbl }) => {
+            // let specialized_ty = specialize_type_generic_arg(tcx, ty, generic_args_map);
             let specialized_ty = specialize_type_generic_arg(tcx, *ty, generic_args_map);
             tcx.mk_ptr(rustc_middle::ty::TypeAndMut {
                 ty: specialized_ty,
                 mutbl: *mutbl,
             })
         }
+        
         TyKind::FnDef(def_id, substs) => {
             tcx.mk_fn_def(*def_id, specialize_substs(tcx, substs, generic_args_map))
         }
-        TyKind::Tuple(substs) => tcx.mk_tup(
-            // specialize_list(tcx, substs) // modify 
-            substs.iter(),
-        ),
+        // TODO: N1 List Type    modify 20230815
+        TyKind::Tuple(substs) => {
+            //println!("111111111111111111");
+            tcx.mk_tup(// substs: List<Ty>,
+                specialize_substs(
+                    tcx, 
+                     &(substs
+                                .iter()
+                                .map(|t|t.into()).collect::<Vec<GenericArg<'tcx>>>()
+                            ),
+                    generic_args_map
+                )
+                    .iter()
+                    .map(|generic_arg| generic_arg.expect_ty()),
+                // specialize_list(tcx, substs) // modify 
+                // substs.iter(),
+            )
+        },
+       
+        
         TyKind::Closure(def_id, substs) => {
             tcx.mk_closure(*def_id, specialize_substs(tcx, substs, generic_args_map))
         }
@@ -182,12 +203,13 @@ pub fn specialize_type_generic_arg<'tcx>(
             let specialized_fn_sig = fn_sig.map_bound(map_fn_sig);
             tcx.mk_fn_ptr(specialized_fn_sig)
         }
+        
         TyKind::Alias(AliasKind::Projection, projection) => {
             let specialized_substs = specialize_substs(tcx, projection.substs, generic_args_map);
             let item_def_id = projection.def_id; // modify 13-2 cannot mofify
 
             if are_concrete(specialized_substs) {
-                let param_env = tcx.param_env(tcx.associated_item(item_def_id).def_id); // modify 13-3 cannot mofify  //tap1
+                let param_env = tcx.param_env(tcx.associated_item(item_def_id).container_id(tcx)); // modify 13-3 cannot mofify  //tap1
                 if let Ok(Some(instance)) = rustc_middle::ty::Instance::resolve(
                     tcx,
                     param_env,
@@ -223,7 +245,8 @@ pub fn specialize_type_generic_arg<'tcx>(
         TyKind::Dynamic(predicates, region, dykind) => {
             let specialized_predicates = tcx.mk_poly_existential_predicates(predicates.iter().map(
                 |pred: rustc_middle::ty::Binder<ExistentialPredicate<'tcx>>| {
-                    //rustc_middle::ty::Binder::bind(
+                    //rustc_middle::ty::Binder::bind(  //???
+                    
                     rustc_middle::ty::Binder::dummy(
                         // modify 15
                         match pred.skip_binder() {
@@ -239,17 +262,30 @@ pub fn specialize_type_generic_arg<'tcx>(
                                 def_id,
                                 substs,
                                 //ty,
-                                term,
-                                ..
-                            }) => ExistentialPredicate::Projection(ExistentialProjection {
-                                //item_def_id,
-                                def_id,
-                                substs: specialize_substs(tcx, substs, generic_args_map),
-                                //ty: specialize_type_generic_arg(tcx, ty, generic_args_map),
-                                term: specialize_type_generic_arg(tcx, ty, generic_args_map).into(),
-                            }),
+                                term
+                            }) =>{
+                                if let Some(term_ty) = term.ty(){
+                                    ExistentialPredicate::Projection(ExistentialProjection {
+                                        //item_def_id,
+                                        def_id,
+                                        substs: specialize_substs(tcx, substs, generic_args_map),
+                                        //ty: specialize_type_generic_arg(tcx, ty, generic_args_map),
+                                        term: specialize_type_generic_arg(tcx, term_ty, generic_args_map).into(),
+                                    })
+                                }else{
+                                    ExistentialPredicate::Projection(ExistentialProjection {
+                                        //item_def_id,
+                                        def_id,
+                                        substs: specialize_substs(tcx, substs, generic_args_map),
+                                        //ty: specialize_type_generic_arg(tcx, ty, generic_args_map),
+                                        term: specialize_type_generic_arg(tcx, ty, generic_args_map).into(),
+                                    })
+                                }
+
+                            } , //
                             ExistentialPredicate::AutoTrait(_) => pred.skip_binder(),
                         },
+                        //tcx,
                     )
                 },
             ));
@@ -258,10 +294,13 @@ pub fn specialize_type_generic_arg<'tcx>(
             // tcx.mk_dynamic(specialized_predicates, *region,/* DynKind */)
             tcx.mk_dynamic(specialized_predicates, *region, *dykind) // modify 18  cannot modify
         }
-          //TyKind::Opaque(def_id, substs)
-        //TyKind::Alias(AliasKind::Opaque, Opaque) => {
-         //   tcx.mk_opaque(*def_id, specialize_substs(tcx, substs, generic_args_map))
-        //}
+        
+        // TyKind::Opaque(def_id, substs) => {
+        //     tcx.mk_opaque(*def_id, specialize_substs(tcx, substs, generic_args_map))
+        // }
+        TyKind::Alias(AliasKind::Opaque, opaque) => {                       // 20230713 q1
+           tcx.mk_opaque(opaque.def_id, specialize_substs(tcx, opaque.substs, generic_args_map))
+        }
         
         TyKind::Uint(..)
         | TyKind::Int(..)

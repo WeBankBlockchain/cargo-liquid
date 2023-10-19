@@ -38,7 +38,7 @@ def cmp(test_case_data, ground_true_data):
         else:
             for test_case, ground_true in zip(test_case_data, ground_true_data):
                 if isinstance(test_case, dict):
-                    print("--------------------------------------------------------")
+                    #//print("--------------------------------------------------------")
                     global conflict_index
                     conflict_index += 1
                     print("Processing conflict %d" % (conflict_index))
@@ -72,11 +72,11 @@ for i, func in enumerate(func_list):
     triggered_test_cases_record[temp_index] = 1
 
     # Compare conflict result
-    print("--------------------------------------------------------")
+    #print("--------------------------------------------------------")
     print("Processing test case: %s" % (func["name"]))
     conflict_index = 0
     cmp(func["conflictFields"], ground_true_dict[func["name"]])
-    print("--------------------------------------------------------")
+    #print("--------------------------------------------------------")
     print()
 
 

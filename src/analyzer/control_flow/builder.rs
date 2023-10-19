@@ -14,7 +14,7 @@ use log::*;
 
 use rustc_infer::{
     //infer::InferCtxt,
-    infer::{InferCtxt,TyCtxtInferExt}, //InferOk
+    infer::{InferCtxt, TyCtxtInferExt}, //InferOk
     traits::{FulfillmentErrorCode, Obligation, ObligationCause},
 };
 use rustc_middle::ty::subst::{GenericArg, GenericArgKind, InternalSubsts, SubstsRef};
@@ -35,31 +35,31 @@ use rustc_middle::{
         Instance,
         InstanceDef,
         ParamEnv,
+        Predicate,
+        PredicateKind,
         ToPredicate,
         TraitPredicate,
         TraitRef,
         TyKind,
         TypeAndMut,
-        Predicate,
-        PredicateKind,
     },
 }; //Substs
    //use  rustc_middle::ty::AliasKind;    //modify 04-1
-use rustc_middle::ty::*;
-use rustc_middle::ty;
 use rustc_middle::bug;
+use rustc_middle::ty;
+use rustc_middle::ty::*;
 //use std::ops::Deref;
 //use rustc_middle::ty::subst::Substs;    //modify delete this line
 
 use rustc_span::def_id::DefId;
-use rustc_trait_selection::traits::{FulfillmentContext, TraitEngine,TraitEngineExt};
+use rustc_trait_selection::traits::{FulfillmentContext, TraitEngine, TraitEngineExt};
 use std::{
+    any::type_name, //env::home_dir,
     collections::{HashMap, HashSet, LinkedList},
-    iter::FromIterator, any::type_name, //env::home_dir,
+    iter::FromIterator,
 };
 
 //use std::ops::Deref;
-
 
 struct SubstFolder<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
@@ -294,17 +294,12 @@ impl<'a, 'tcx> SubstFolder<'a, 'tcx> {
     }
 }
 
-
-
-
 #[derive(PartialEq, Eq, Hash, Debug)]
 struct VirtualCallee<'tcx> {
     trait_id: DefId,
     trait_fn: DefId,
     substs: SubstsRef<'tcx>,
 }
-
-
 
 #[derive(Debug)]
 struct VirtualCallContext<'tcx> {
@@ -350,13 +345,10 @@ impl<'tcx> VirtualCallContext<'tcx> {
 //         tls::enter_context(&icx, || f(icx.tcx))
 //     }
 
-
-
 //FnOnce
 #[feature(unboxed_closures)]
 //impl<'tcx, R:FnOnce> VirtualCallee<'tcx> {
 impl<'tcx> VirtualCallee<'tcx> {
-
     // fn enter< F, R>(& GlobalCtxt<'tcx> gl, f: F) -> R
     // where
     //     F: FnOnce(TyCtxt<'tcx>) -> R,
@@ -429,20 +421,17 @@ impl<'tcx> VirtualCallee<'tcx> {
                         let impl_trait_ref = tcx.impl_trait_ref(impl_id).unwrap();
                         //let gcx_ref: &GlobalCtxt<'tcx> = tcx.gcx;
 
-
                         //tcx.as_ref().enter(|infcx| {             // cannot modify 01
                         // (*tcx).enter(|tcx| {
                         //tcx.clone().enter(|infcx| {
 
-
-
-                            // fn enter<'tcx, F, R>(&'tcx GlobalCtxt<'tcx> gl, f: F) -> R
-                            // where
-                            //     F: FnOnce(TyCtxt<'tcx>) -> R,
-                            // {
-                            //     let icx = tls::ImplicitCtxt::new(gl);
-                            //     tls::enter_context(&icx, || f(icx.tcx))
-                            // }
+                        // fn enter<'tcx, F, R>(&'tcx GlobalCtxt<'tcx> gl, f: F) -> R
+                        // where
+                        //     F: FnOnce(TyCtxt<'tcx>) -> R,
+                        // {
+                        //     let icx = tls::ImplicitCtxt::new(gl);
+                        //     tls::enter_context(&icx, || f(icx.tcx))
+                        // }
 
                         //定义了一个名为 enter_fn 的闭包，它接受两个参数：一个 GlobalCtxt 的引用和一个函数 f。
                         //这个闭包创建了一个 ImplicitCtxt，然后使用 tls::enter_context 函数在 ImplicitCtxt 的上下文中调用函数 f
@@ -455,156 +444,120 @@ impl<'tcx> VirtualCallee<'tcx> {
                         // let tcx_temp = icx_temp.tcx;
 
                         //tcx.infer_ctxt().enter(|infcx| // tcx TyCtxt, infer_ctxt ,enter(||),infcx InferCtxt,
-                        let mut enter_func =||{//ImplicitCtxt
-                                let infcx = tcx.infer_ctxt().build();
-                                let mut fulfill_cx = <dyn TraitEngine<'tcx>>::new(infcx.tcx);  // cannot modify 02 ???
-                                //let mut fulfill_cx = rustc_trait_selection::traits::FulfillmentContext::new();  //modify:
-                                let revised_impl_trait_substs = impl_trait_ref
-                                    .substs
-                                    .iter()
-                                    .take(1)
-                                    .chain(self.substs.iter().skip(1))
-                                    .collect::<Vec<_>>();
+                        // let mut enter_func = || { //ImplicitCtxt
+                        // };
+                        // enter_func();
 
-                                let trait_ref = TraitRef::from_method(
-                                    tcx,
-                                    self.trait_id,
-                                    tcx.intern_substs(&revised_impl_trait_substs),
-                                );
-                                let trait_predicate: Predicate<'tcx> = Clause::Trait(
-                                    TraitPredicate{
-                                        trait_ref,
-                                        polarity: rustc_middle::ty::ImplPolarity::Positive,
-                                        constness: rustc_middle::ty::BoundConstness::NotConst,
-                                    }
-                                ).to_predicate(tcx);
-                             
-                            //     let clause_trait = Clause::Trait( //modify 04
-                            //    // let trait_predicate = PredicateKind::Trait(
-                            //         //TraitPredicate { trait_ref },       //modify 03
-                            //         TraitPredicate
-                            //         {
-                            //             trait_ref,
-                            //             polarity: rustc_middle::ty::ImplPolarity::Positive,
-                            //             constness: rustc_middle::ty::BoundConstness::NotConst,
-                            //         }
+                        let infcx = tcx.infer_ctxt().build();
 
-                            //         /*TraitPredicate {
-                            //             trait_ref,
-                            //             polarity:hir::TraitBoundModifier::None,
-                            //             constness: hir::Constness::NotConst,
-                            //         },*/
-                            //         // A const trait bound looks like:
-                            //         // ```
-                            //         // struct Foo<Bar> where Bar: const Baz { ... }
-                            //         // ```
-                            //         // For now we don't take this situation into consideration.
-                            //         // Constness::NotConst,           //modify 03
-                            //     );
-                            //     // clause_trait.abcd();
-                            //     let trait_predicate: Predicate<'tcx> = clause_trait.to_predicate(tcx);
-                                /*
-                                1. change rust version to nightly-2021-06-23, 
-                                2. basing on the func, create the doc of 21-6-23.
-                                3. find the source code of   rustc_middle ,  Predicate<'tcx>.subst(,), learn about what it 's doing.  InferCtxt, 
-                                _. get 23-1-3 Predicate<'tcx> 's doc.(*)
-                                
-                                4. use *'s [func]s to impl a new subst func to get the same result of the older one.
-                                
-                                
-                                 */
-                                //k2mistake
-                                //代码中的 TyCtxt<'_'> 应该是一个类型注释，用于指定 Obligation 对象的类型。
-                                //但是这里似乎有一个错误，应该传递一个 TyCtxt 类型的实例作为参数，而不是类型注释。
-                                let mut folder = SubstFolder { tcx, substs: rebased_substs, binders_passed: 0 };// TODO*: find or write(create) a Folder struct to substitute the SubstFolder,
-                                let fold_result = trait_predicate.try_fold_with(&mut folder);
-                                if let Result::Ok(trait_predicate) = fold_result{
-                                    // let trait_predicate = trait_predicate.subst(tcx, rebased_substs);// 
-                                    let obligation = Obligation::new(
-                                    //TyCtxt<'_'>,
-                                        tcx,
-                                        ObligationCause::dummy(),
-                                        param_env,
-                                        trait_predicate,
-                                    );
-                                    fulfill_cx.register_predicate_obligation(&infcx, obligation.clone());
-                                    // Drives compiler to do type checking and constraint solving.
-                                    //Vec<FulfillmentError<'tcx>, Global>
-                                    let fullfillcx_errs = fulfill_cx.select_all_or_error(&infcx);//
-    
-                                    if fullfillcx_errs.len()>0 {   //modify 05
-                                        //let errors: Vec<_> = err.into_iter().collect();
-    
-                                        debug!(
+                        let mut fulfill_cx = <dyn TraitEngine<'tcx>>::new(infcx.tcx); // cannot modify 02 ???
+                        
+                        //let mut fulfill_cx = FulfillmentContext::new(); //modify:
+                      
+
+                        let revised_impl_trait_substs = impl_trait_ref
+                            .substs
+                            .iter()
+                            .take(1)
+                            .chain(self.substs.iter().skip(1))
+                            .collect::<Vec<_>>();
+
+                        let trait_ref = TraitRef::from_method(
+                            tcx,
+                            self.trait_id,
+                            tcx.intern_substs(&revised_impl_trait_substs),
+                        );
+                        let trait_predicate: Predicate<'tcx> =
+                            Clause::Trait(TraitPredicate {
+                                trait_ref,
+                                polarity: rustc_middle::ty::ImplPolarity::Positive,
+                                constness: rustc_middle::ty::BoundConstness::NotConst,
+                            }).to_predicate(tcx);
+                        // let trait_predicate = trait_predicate.subst(tcx, rebased_substs);//
+
+                        let mut folder = SubstFolder {
+                            tcx,
+                            substs: rebased_substs,
+                            binders_passed: 0,
+                        }; // TODO*: find or write(create) a Folder struct to substitute the SubstFolder,
+                        let trait_predicate = trait_predicate.fold_with(&mut folder);
+                        //println!("*******debug trait engine:{:?}", fulfill_cx);
+
+                        //if let Result::Ok(trait_predicate) = fold_result {
+                        
+                        let obligation = Obligation::new(
+                            //TyCtxt<'_'>,
+                            tcx,
+                            ObligationCause::dummy(),
+                            param_env,
+                            trait_predicate,
+                        );
+                        fulfill_cx.register_predicate_obligation(&infcx, obligation.clone());
+                        println!("fulfill_cx registering oredicate");
+                        // Drives compiler to do type checking and constraint solving.
+                        //Vec<FulfillmentError<'tcx>, Global>
+                        let fullfillcx_errs = fulfill_cx.select_all_or_error(&infcx); //
+
+                        if fullfillcx_errs.len() > 0 {
+                            //modify 05
+                            //let errors: Vec<_> = err.into_iter().collect();
+
+                            debug!(
                                             "candidate selecting failed: `{:?}` doesn't implements `{:?}`, due to `{:?}`",
                                             trait_ref.substs, trait_ref.def_id, fullfillcx_errs[0] //
                                         );
-                                    } else {
-                                        let predicates = tcx.predicates_of(impl_id);
-                                        predicates.predicates.iter().for_each(|(predicate, _)| {
-                                            let kind = predicate.kind().skip_binder();
-                                            match kind {
-                                                // Clause::Trait(..) | Clause::Projection(..) => (),   ///modify 06
-                                                //PredicateKind::Trait(..) | PredicateKind::Projection(..) => (),
-                                                PredicateKind::Clause(Clause::Trait(..)) | PredicateKind::Clause(Clause::Projection(..)) => (),
-                                                unknown => todo!("unknown predicate kind `{:?}`", unknown),
-                                            }
-                                        });
-    
-                                        let assoc_items = tcx.associated_items(impl_id);
-                                        let target_name = tcx.item_name(self.trait_fn);
-                                        let mut assoc_fn = assoc_items.in_definition_order().filter_map(|assoc_item| {
-                                            if assoc_item.kind == AssocKind::Fn && assoc_item.ident(tcx).name == target_name {
-                                                Some(assoc_item.def_id)
-                                            } else {
-                                                None
-                                            }
-                                        });
-    
-                                        let instantiate_substs = Self::instantiate_proj_substs(
-                                            tcx,
-                                            predicates,
-                                            rebased_substs,
-                                            param_env,
-                                            &mut fulfill_cx,
-                                            &infcx,
-                                        );
-    
-                                        if let Some(def_id) = assoc_fn.next() {
-                                            // In Rust, `Clone` trait is not object-safe because the
-                                            // signature of its clone method returns `Self`, so we are
-                                            // very sure that it cannot be used in trait object.
-                                            candidates.push(Method {
-                                                def_id,
-                                                substs: tcx.mk_substs(instantiate_substs.iter()),
-                                                self_ty: None,
-                                                used_for_clone: false,
-                                            })
-                                        } else {
-                                            todo!("default impl");
-                                        }
-                                        context.add_processed_adt_substs(adt_id, substs);
-                                    }
-                                
-                                }else if let Result::Err(err) = fold_result  {
-                                    // let err = fold_result.0;
-                                    println!("In analyzer/control_flow/builder.rs:350, result not matched");
-                                    println!("{}",err);
+                        } else {
+
+                            let predicates = tcx.predicates_of(impl_id);
+                            predicates.predicates.iter().for_each(|(predicate, _)| {
+                                let kind = predicate.kind().skip_binder();
+                                match kind {
+                                    // Clause::Trait(..) | Clause::Projection(..) => (),   ///modify 06
+                                    //PredicateKind::Trait(..) | PredicateKind::Projection(..) => (),
+                                    PredicateKind::Clause(Clause::Trait(..))
+                                    | PredicateKind::Clause(Clause::Projection(..)) => (),
+                                    unknown => todo!("unknown predicate kind `{:?}`", unknown),
                                 }
+                            });
 
-                                
+                            let assoc_items = tcx.associated_items(impl_id);
+                            let target_name = tcx.item_name(self.trait_fn);
+                            let mut assoc_fn =
+                                assoc_items.in_definition_order().filter_map(|assoc_item| {
+                                    if assoc_item.kind == AssocKind::Fn
+                                        && assoc_item.ident(tcx).name == target_name
+                                    {
+                                        Some(assoc_item.def_id)
+                                    } else {
+                                        None
+                                    }
+                                });
 
-                                //let trait_predicate = trait_predicate.subst(tcx, rebased_substs);
-                                //let obligation_predicate = ObligationPredicate::Trait(trait_predicate);
-                                // let obligation = Obligation::new(
-                                //     ObligationCause::dummy(),
-                                //    param_env,
-                                //    obligation_predicate,
-                                // );
+                            let instantiate_substs = Self::instantiate_proj_substs(
+                                tcx,
+                                predicates,
+                                rebased_substs,
+                                param_env,
+                                &mut fulfill_cx,
+                                &infcx,
+                            );
 
-                              
-                        };
-                        enter_func();
+                            if let Some(def_id) = assoc_fn.next() {
+                                // In Rust, `Clone` trait is not object-safe because the
+                                // signature of its clone method returns `Self`, so we are
+                                // very sure that it cannot be used in trait object.
+                                candidates.push(Method {
+                                    def_id,
+                                    substs: tcx.mk_substs(instantiate_substs.iter()),
+                                    self_ty: None,
+                                    used_for_clone: false,
+                                })
+                            } else {
+                                todo!("default impl");
+                            }
+                            context.add_processed_adt_substs(adt_id, substs);
+                        }
+                        
                     }
                 }
                 _ => todo!("unknown impl kind: {:?}", impl_kind),
@@ -618,7 +571,7 @@ impl<'tcx> VirtualCallee<'tcx> {
         predicates: GenericPredicates<'tcx>,
         substs: SubstsRef<'tcx>,
         param_env: ParamEnv<'tcx>,
-        fulfill_cx: &mut std::boxed::Box<dyn TraitEngine<'tcx>>,// 
+        fulfill_cx: &mut std::boxed::Box<dyn TraitEngine<'tcx>>, //
         //infcx: &InferCtxt<'_, 'tcx>,
         infcx: &InferCtxt<'tcx>,
     ) -> Vec<GenericArg<'tcx>> {
@@ -907,7 +860,7 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
                 if let Some(terminator) = terminator {
                     match terminator.kind {
                         TerminatorKind::Call {
-                            destination,
+                            //destination,
                             target,
                             cleanup,
                             ..
@@ -963,7 +916,7 @@ impl<'graph, 'tcx> Builder<'graph, 'tcx> {
                                     kind: NodeKind::Normal,
                                 }];
                                 self.cfg
-                                    .add_edge(curr_node_index, dest_index, call_to_return_edge);
+                                    .add_edge(curr_node_index, dest_index, call_to_return_edge)
                             }
 
                             if let Some(cleanup) = cleanup {

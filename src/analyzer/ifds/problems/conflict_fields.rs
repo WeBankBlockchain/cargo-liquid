@@ -9,8 +9,8 @@ use log::*;
 use rustc_middle::{
     mir::{
         interpret::{AllocRange, ConstValue, GlobalAlloc, Scalar},
-        BorrowKind, Constant, ConstantKind, Local, Mutability, Operand, Place,
-        PlaceElem, Rvalue, StatementKind, TerminatorKind, RETURN_PLACE,
+        BorrowKind, Constant, ConstantKind, Local, Mutability, Operand, Place, PlaceElem, Rvalue,
+        StatementKind, TerminatorKind, RETURN_PLACE,
     },
     ty::{ConstKind, ParamEnv, ScalarInt, Ty, TyCtxt, TyKind},
 };
@@ -133,7 +133,6 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
         self.var_defs.entry(def_id).or_default();
         let body = self.tcx.optimized_mir(def_id);
         let basic_blocks = &body.basic_blocks;
-
         let mut record_def =
             |l_local: Local, r_local: Local, projection: &'tcx [PlaceElem<'tcx>]| {
                 let mut fields = vec![];
@@ -154,8 +153,10 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                         fields,
                     });
             };
-
+        //println!("#####################basic_blocks: {:?}",basic_blocks);
         for bb in basic_blocks.indices() {
+            //  println!("@@@@bb: {:?}",bb);
+            //  println!("@==@basic_blocks[bb]: {:?}",basic_blocks[bb]);
             let stmts = &basic_blocks[bb].statements;
             for stmt in stmts {
                 match &stmt.kind {
@@ -211,6 +212,8 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
             .into_engine(self.tcx, body)
             .iterate_to_fixpoint()
             .into_results_cursor(body);
+
+        //println!("=========results: {}",results);
 
         let mut maybe_mut_borrowed_in_method = HashSet::new();
         for bb in body.basic_blocks.indices() {
@@ -560,7 +563,10 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
             ConstantKind::Ty(constant) => match &constant.kind() {
                 ConstKind::Unevaluated(unevaluated) => {
                     let param_env = ParamEnv::reveal_all();
-                    let unevaluated = rustc_middle::mir::UnevaluatedConst::new(unevaluated.def,unevaluated.substs);
+                    let unevaluated = rustc_middle::mir::UnevaluatedConst::new(
+                        unevaluated.def,
+                        unevaluated.substs,
+                    );
                     if let Some(resolved_val) = self
                         .tcx
                         //.const_eval_resolve(param_env, *UnevaluatedConst, None)
@@ -584,7 +590,9 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                     //ConstValue
                     //let scalar_val = valtree.try_to_scalar();
 
-                    if let Some(resolved_val) = self.resolve_const_val(&self.tcx.valtree_to_const_val((constant.ty(), val.clone()))) {
+                    if let Some(resolved_val) = self.resolve_const_val(
+                        &self.tcx.valtree_to_const_val((constant.ty(), val.clone())),
+                    ) {
                         // modify 25 cannot modify   not found
                         return Some(resolved_val);
                     } // val {ValTree}, not ConstValue, if it is directly casted to ConstValue, the type of [val] which could be Scalar or Slice needs to be clear;
@@ -593,7 +601,7 @@ impl<'tcx, 'graph> ConflictFields<'tcx, 'graph> {
                 }
                 _ => (),
             },
-            _=> return None, //  TODO: Unevaluated(UnevaluatedConst<'tcx>, Ty<'tcx>)?
+            _ => return None, //  TODO: Unevaluated(UnevaluatedConst<'tcx>, Ty<'tcx>)?
         }
         None
     }
@@ -611,8 +619,10 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
         &mut self,
     ) -> HashMap<<Self::Icfg as InterproceduralCFG>::Node, HashSet<Self::Fact>> {
         let entrance = self.icfg.get_method_by_index(self.entry_point);
+        //println!("------------------entrance{:?}",entrance);
         self.insert_var_defs(entrance);
         let start_points = self.icfg.get_start_points_of(entrance);
+        //println!("------------------SP{:?}",start_points);
         let mut initial_seeds: HashMap<_, _> = Default::default();
         for start_point in start_points {
             initial_seeds.insert(*start_point, HashSet::from_iter([Self::zero_value()]));
@@ -638,13 +648,16 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
 
         let kind = &terminator.kind;
         if let TerminatorKind::Call {
-            args, destination, ..
+            args,
+            destination,
+            target,
+            ..
         } = kind
         {
             if callee.used_for_clone {
                 // Maybe this callee is a implementation provided by user.
                 //let dst = match destination {  // modify 26 cannot modify   not found
-                 //   Some((place, _)) => place,
+                //   Some((place, _)) => place,
                 // _ => unreachable!(),
                 //};
                 let src = match &args[0] {
@@ -655,24 +668,60 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
             }
 
             self.insert_var_defs(callee);
-
-            // if let Some((ret_place, _)) = destination {         // modify 27 cannot modify   not found
-            let ret_local = destination.local; // modify 28 cannot modify   not found
-            return self.process_assignment(
-                Place {
-                    local: ret_local,
-                    projection: self.tcx.intern_place_elems(&[]),
-                },
-                Some(&Place {
-                    local: RETURN_PLACE,
-                    projection: self.tcx.intern_place_elems(&[]),
-                }),
-                caller_id,
-                callee_id,
-            );
-            // } else {
-            //     Self::empty()
+            //之前的destination可能会在空的情况，所以他会返回self：：empty。但是现在不会返回空，他一定有这个值，所以这里暂时不知道如何处理
+            // match target {
+            //     None => {
+            //         return Self::empty();
+            //     }
+            //     _ => {
+            //         let ret_local = destination.local; // modify 28 cannot modify   not found
+            //         return self.process_assignment(
+            //             Place {
+            //                 local: ret_local,
+            //                 projection: self.tcx.intern_place_elems(&[]),
+            //             },
+            //             Some(&Place {
+            //                 local: RETURN_PLACE,
+            //                 projection: self.tcx.intern_place_elems(&[]),
+            //             }),
+            //             caller_id,
+            //             callee_id,
+            //         );
+            //     }
             // }
+            if !destination.projection.is_empty(){
+                self.process_assignment(
+                        Place {
+                            local: destination.local,
+                            projection: self.tcx.intern_place_elems(&[]),
+                        },
+                        Some(&Place {
+                            local: RETURN_PLACE,
+                            projection: self.tcx.intern_place_elems(&[]),
+                        }),
+                        caller_id,
+                        callee_id,
+                    )
+            } else {
+                Self::empty()
+            }
+            // if let Some((ret_place, _)) = destination {         // modify 27 cannot modify   not found
+            // let ret_local = destination.local; // modify 28 cannot modify   not found
+            // return self.process_assignment(
+            //     Place {
+            //         local: ret_local,
+            //         projection: self.tcx.intern_place_elems(&[]),
+            //     },
+            //     Some(&Place {
+            //         local: RETURN_PLACE,
+            //         projection: self.tcx.intern_place_elems(&[]),
+            //     }),
+            //     caller_id,
+            //     callee_id,
+            // );                                       // label 20230818
+            // // } else {
+            // //     Self::empty()
+            // // }
         } else {
             unreachable!("the kind of terminator at call site must be `Call`")
         }
@@ -812,10 +861,10 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
             assert!(callees.len() == 1);
             let callee = callees[0];
 
-            let dst = destination.clone(); //match destination {
-                                           //Some((place, _)) => place.clone(),                    // modify 29 cannot modify   not found
-                                           //   None => unreachable!(),
-                                           // };//mistake:j2:unsolve
+            // let dst = destination.clone(); //match destination {
+            //Some((place, _)) => place.clone(),                    // modify 29 cannot modify   not found
+            //   None => unreachable!(),
+            // };//mistake:j2:unsolve
 
             //let dst = match destination {
             //  Some((place, _)) => Some(place.clone()),
@@ -834,7 +883,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                     Operand::Move(place) | Operand::Copy(place) => place,
                     _ => unreachable!(),
                 };
-                return self.process_assignment(dst, Some(src), method_id, method_id);
+                return self.process_assignment(*destination, Some(src), method_id, method_id);
             }
 
             let fn_name = KnownNames::get(self.tcx, callee.def_id);
@@ -857,7 +906,7 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                     } = fact
                     {
                         if let Key::Var(_, access_path) = key {
-                            if access_path.base == dst.local {
+                            if access_path.base == destination.local {
                                 let new_fact = ConflictField::Field {
                                     container: *container,
                                     key: env_key.clone(),
@@ -1188,7 +1237,8 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
 
             Box::new(move |fact| {
                 let mut results = HashSet::from_iter([fact.clone()]);
-                for item in &assignments { // 
+                for item in &assignments {
+                    //
                     match item {
                         Either::Left(flow_fn) => {
                             let facts = results.drain().collect::<Vec<_>>();
@@ -1210,7 +1260,8 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
                                     read_only,
                                 } = &fact
                                 {
-                                    if let Ok(l_ap) = AccessPath::try_from(*l_place) {  //maybe try_from biancheng from
+                                    if let Ok(l_ap) = AccessPath::try_from(*l_place) {
+                                        //maybe try_from biancheng from
                                         if access_path == &l_ap {
                                             results.insert(ConflictField::Field {
                                                 container: *container,
@@ -1250,25 +1301,59 @@ impl<'tcx, 'graph> IfdsProblem<'tcx> for ConflictFields<'tcx, 'graph> {
         let bbd = &body.basic_blocks[basic_block];
         let terminator = bbd.terminator.as_ref().unwrap();
 
-        if let TerminatorKind::Call { destination, .. } = &terminator.kind {
+        if let TerminatorKind::Call {
+            destination,
+            target,
+            ..
+        } = &terminator.kind
+        {
             //if let Some((ret_place, _)) = destination {           // modify 30 cannot modify   not found
             //let ret_local = ret_place.flush();
-            let ret_local = destination.local; // modify 31 cannot modify   not found
-            return Box::new(move |fact| {
-                let mut results = HashSet::new();
-                if let ConflictField::Field {
-                    key: Key::Var(_, access_path),
-                    ..
-                } = fact
-                {
-                    if access_path.base != ret_local {
-                        results.insert(fact.clone());
-                    }
-                } else {
-                    results.insert(fact.clone());
-                }
-                results
-            });
+            // 20230818 之前的destination可能会在空的情况，所以他会返回self：：identity但是现在不会返回空，他一定有这个值，所以这里暂时不知道如何处理
+            // match target {
+            //     None => {
+            //         return Self::identity();
+            //     }
+            //     _ => {
+            //         let ret_local = destination.local; // modify 31 cannot modify   not found
+            //         return Box::new(move |fact| {
+            //             let mut results = HashSet::new();
+            //             if let ConflictField::Field {
+            //                 key: Key::Var(_, access_path),
+            //                 ..
+            //             } = fact
+            //             {
+            //                 if access_path.base != ret_local {
+            //                     results.insert(fact.clone());
+            //                 }
+            //             } else {
+            //                 results.insert(fact.clone());
+            //             }
+            //             results
+            //         });
+            //     }
+            // }
+            if !destination.projection.is_empty(){
+                let ret_local = destination.local; // modify 31 cannot modify   not found
+                    return Box::new(move |fact| {
+                        let mut results = HashSet::new();
+                        if let ConflictField::Field {
+                            key: Key::Var(_, access_path),
+                            ..
+                        } = fact
+                        {
+                            if access_path.base != ret_local {
+                                results.insert(fact.clone());
+                            }
+                        } else {
+                            results.insert(fact.clone());
+                        }
+                        results
+                    });
+            } else {
+                Self::identity()
+            }
+
             // } else {
             //    Self::identity()
             //}

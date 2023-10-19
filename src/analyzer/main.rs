@@ -26,8 +26,15 @@ use std::{
     io::{self, Write},
     process::{self, Command},
 };
+// use env_logger::{Builder, Target};
+
+
 
 fn main() {
+    // Builder::new()
+    //     .target(Target::Stdout)
+    //     .init();
+
     let mut args = env::args_os()
         .enumerate()
         .map(|(i, arg)| {
@@ -62,7 +69,7 @@ fn main() {
 
             let result = rustc_driver::catch_fatal_errors(|| {
                 info!("analysis process started");
-
+                //println!("**********************args: {:?}",args);
                 let always_encode_mir = String::from("always-encode-mir");
                 if !args.iter().any(|arg| arg.ends_with(&always_encode_mir)) {
                     args.push("-Z".into());
@@ -72,7 +79,11 @@ fn main() {
 
                 let cfg_path = std::env::var("LIQUID_ANALYSIS_CFG_PATH")
                     .ok()
-                    .map(|path| path.into());
+                    .map(|path| {
+                        //println!("*************************cfg-path={}",path);
+                        path.into()
+                    }); // whether none or not ? 
+                //println!("||||||||||||||||||||||||{:?}",cfg_path);
                 let mut callbacks = callbacks::AnalysisCallbacks { cfg_path };
 
                 // In practice, when starting compiling process, the rustc_driver

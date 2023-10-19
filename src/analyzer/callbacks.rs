@@ -31,9 +31,9 @@ use rustc_interface::{interface::Compiler, Queries};
 use rustc_middle::{
     mir::{
         BindingForm, Body, ClearCrossCrate, Local, LocalInfo, Operand,
-        TerminatorKind                             //ImplicitSelfKind                                 
+        TerminatorKind,                             //ImplicitSelfKind                                 
     },
-    ty::{DefIdTree, Ty, TyCtxt, TyKind, Visibility}  
+    ty::{DefIdTree, Ty, TyCtxt, TyKind, Visibility},  
 };
 use rustc_hir::ImplicitSelfKind;       //modify: rust_middle::mir::ImplicitSelfKind --> this line
 //use rustc_middle::ty::adjustment; 
@@ -60,6 +60,7 @@ const STORAGE_NS: [&str; 3] = ["Storage", "__liquid_storage", "__liquid_private"
 const INTERFACE_NS: [&str; 3] = ["Interface", "__liquid_interface", "__liquid_private"];
 
 impl rustc_driver::Callbacks for AnalysisCallbacks {
+    //println!("Callback----------------00000");
     /// Called after the compiler has completed all analysis passes and before it
     /// lowers MIR to LLVM IR. At this point the compiler is ready to tell us all
     /// it knows and we can proceed to do analysis of all of the functions that
@@ -82,6 +83,7 @@ impl rustc_driver::Callbacks for AnalysisCallbacks {
 }
 
 mod field_kind {
+    //println!("Callback----------------11111");
     pub type Type = u8;
 
     /// `0` represents `All`, which means the contract attempts to visit a `Value<T>` or the
@@ -104,6 +106,7 @@ mod field_kind {
 }
 
 mod env_info_kind {
+    //println!("Callback----------------22222");
     pub type Type = usize;
 
     /// `0` represents caller of transaction.
@@ -119,6 +122,7 @@ mod env_info_kind {
 }
 
 impl AnalysisCallbacks {
+    //println!("Callback----------------33333");
     fn analyze_conflict_fields<'tcx>(
         &self,
         mut_methods: &Vec<MethodIndex>,
@@ -128,6 +132,7 @@ impl AnalysisCallbacks {
         storage_ty: Ty<'tcx>,
     ) {
         #[derive(Serialize, PartialOrd, Ord, PartialEq, Eq, Hash, Clone, Debug)]
+        //println!("Callback----------------44444");
         struct FieldDesc {
             /// The index of which state variable will be visited.
             slot: usize,
@@ -148,11 +153,13 @@ impl AnalysisCallbacks {
             /// Whether this conflict field is used to visit some a state variable mutably.
             read_only: bool,
         }
+        //println!("Callback----------------44444");
 
         let contains_interface_invocation = |method| {
             let mut visited = HashSet::new();
             let mut work_list = LinkedList::new();
             work_list.push_back(method);
+            //println!("Callback----------------55555");
 
             while !work_list.is_empty() {
                 let curr_method = work_list.pop_front().unwrap();
@@ -177,38 +184,56 @@ impl AnalysisCallbacks {
             }
             false
         };
+        //println!("Callback----------------66666");
 
         let target_dir = PathBuf::from(env::var("LIQUID_ANALYSIS_TARGET_DIR").unwrap());
+        //println!("Callback----------------77777");
+        //println!("target_dir: {:?}",target_dir);
         let bwd_cfg = BackwardCFG::new(&fwd_cfg);
-        let mut field_descs = HashMap::new();
+        //println!("Callback----------------88888");
+        let mut field_descs: HashMap<String, Vec<FieldDesc>> = HashMap::new();
+        //println!("Callback----------------99999");
 
         for method_index in mut_methods {
+            //println!("Callback----------------101010");
             let method_index = *method_index;
             let method = bwd_cfg.get_method_by_index(method_index);
             let results = if contains_interface_invocation(method) {
+                //println!("Callback----------------111111");
                 HashSet::new()
             } else {
+                //println!("Callback----------------121212");
                 let problem = ConflictFields::new(tcx, &bwd_cfg, method_index, storage_ty); // work1
                 // println!("-----------------------------------Debug-----------------------------");
                 // println!("{}",problem);
                 // println!("----------------------------------//Debug---------------------------"); 
+                //println!("------------------TEST1{:?}",val_container);
+                //println!("Callback----------------131313");
                 let mut ifds_solver = IfdsSolver::new(problem, &bwd_cfg, true);// init set
+                // ifds.
+                //println!("Callback----------------141414");
                 ifds_solver.solve(); // work2 
+                //println!("Callback----------------151515");
                 let end_point = bwd_cfg.get_end_points_of(method);
+                //println!("Callback----------------161616");
                 debug_assert!(end_point.len() == 1);
+                //println!("Callback----------------171717");
                 let end_point = end_point[0];
+                //println!("Callback----------------181818");
                 ifds_solver.get_results_at(end_point)
 
                 
 
             };
+            //println!("Callback----------------191919");
 
             let method_id = method.def_id;
             let fn_name = tcx.item_name(method_id);
             let fn_name = format!("{}", fn_name.as_str());
-            println!("===================================Debug=============================");
-            println!("{},{:?}",fn_name,results);
-            println!("===================================//Debug============================="); 
+            //println!("===================================Debug=============================");
+            //println!("{},{:?}",fn_name,results);
+            //println!("===================================//Debug============================="); 
+            //println!("Callback----------------202020");
 
             let mut conflict_fields = results
                 .iter()
@@ -266,15 +291,21 @@ impl AnalysisCallbacks {
                     }
                 })
                 .collect::<Vec<_>>();
+            //println!("Callback----------------212121");
 
             conflict_fields.sort();
             conflict_fields.dedup();
+            //println!("Callback----------------222222");
             let mut composed_conflict_fields: Vec<FieldDesc> = vec![];
+            //println!("Callback----------------232323");
             let mut add_to_composed = |field_to_add: FieldDesc| {
+                //println!("Callback----------------242424");
                 if field_to_add.kind == field_kind::LEN {
+                 //   println!("Callback----------------252525");
                     composed_conflict_fields.push(field_to_add);
                     return;
                 }
+                //println!("Callback----------------262626");
 
                 if composed_conflict_fields
                     .iter()
@@ -288,11 +319,13 @@ impl AnalysisCallbacks {
                     composed_conflict_fields.push(field_to_add);
                 }
             };
+            //println!("Callback----------------272727");
             let mut i = 0;
             loop {
                 if i >= conflict_fields.len() {
                     break;
                 }
+                //println!("Callback----------------282828");
 
                 if i == conflict_fields.len() - 1 {
                     add_to_composed(conflict_fields[i].clone());
@@ -324,6 +357,7 @@ impl AnalysisCallbacks {
                 field_descs.insert(fn_name, composed_conflict_fields);
             }
         }
+        //println!("Callback----------------292929");
 
         fs::write(
             target_dir.join("conflict_fields.analysis"),
@@ -341,6 +375,7 @@ impl AnalysisCallbacks {
         compiler: &Compiler,
     ) {
         let problem = UninitializedStates::new(tcx, &fwd_cfg, constructor, storage_ty);
+        //println!("-----callback01-----problem: {:?}",problem);
         let mut ifds_solver = IfdsSolver::new(problem, &fwd_cfg, true);
         ifds_solver.solve();
 
@@ -348,6 +383,7 @@ impl AnalysisCallbacks {
             |node_idx, _| Some(fwd_cfg.graph.node_weight(node_idx).unwrap()),
             |edge_idx, _| {
                 let edge_weight = fwd_cfg.graph.edge_weight(edge_idx).unwrap();
+                //println!("Callback----------------323232");
                 if edge_weight.kind == EdgeKind::Return {
                     None
                 } else {
@@ -372,6 +408,7 @@ impl AnalysisCallbacks {
                 }
             },
         );
+        //println!("Callback----------------333333");
 
         let constructor = fwd_cfg.get_method_by_index(constructor);
         let start_points = fwd_cfg.get_start_points_of(constructor);
@@ -385,20 +422,25 @@ impl AnalysisCallbacks {
         // check this invariant again.
         let mut dfs = Dfs::new(&subgraph, fwd_cfg.node_to_index[start_points[0]]);
         let session = compiler.session();
+       // println!("Callback----------------343434");
 
         while let Some(node_index) = dfs.next(&subgraph) {
+            //println!("Callback----------------353535");
             let node = fwd_cfg.graph.node_weight(node_index).unwrap();
             if fwd_cfg.is_call(node) {
+                //println!("Callback----------------363636");
                 let belongs_to = node.belongs_to;
                 let method = fwd_cfg.get_method_by_index(belongs_to);
                 let body = tcx.optimized_mir(method.def_id);
                 let bbd = &body.basic_blocks[node.basic_block.unwrap()];
+                //println!("$$$$$$$$$$$$$$$$$$$$$$$$$$$basic_blocks:{:?},bbd:{:?}",body.basic_blocks,bbd);
                 let terminator = bbd.terminator();
                 let local_decls = &body.local_decls;
 
                 if let TerminatorKind::Call { func, args, .. } = &terminator.kind {
                     if let TyKind::FnDef(def_id, ..) = func.ty(local_decls, tcx).kind() {
                         let fn_name = KnownNames::get(tcx, *def_id);
+                        //println!("Callback----------------373737");
                         if matches!(
                             fn_name,
                             KnownNames::LiquidStorageCollectionsMappingLen
@@ -421,6 +463,7 @@ impl AnalysisCallbacks {
                                 | KnownNames::LiquidStorageCollectionsIterableMappingUse
                                 | KnownNames::LiquidStorageCollectionsIterableMappingIterNext
                         ) {
+                            //println!("Callback----------------383838");
                             let results = ifds_solver.get_results_at(node);
                             let indices = results
                                 .into_iter()
@@ -453,6 +496,7 @@ impl AnalysisCallbacks {
                 }
             }
         }
+        //println!("Callback----------------393939");
 
         let states = if let TyKind::Adt(adt_def, ..) = storage_ty.kind() {
             adt_def
@@ -464,8 +508,10 @@ impl AnalysisCallbacks {
             unreachable!("`Storage` should be a struct type")
         };
         let end_points = fwd_cfg.get_end_points_of(constructor);
+        //println!("Callback----------------404040");
         for end_point in end_points {
             let final_results = ifds_solver.get_results_at(end_point);
+            //println!("Callback----------------414141");
             if !final_results.is_empty() {
                 let mut final_result = final_results
                     .into_iter()
@@ -478,6 +524,7 @@ impl AnalysisCallbacks {
                     })
                     .collect::<Vec<_>>();
                 final_result.sort();
+                //println!("Callback----------------424242");
 
                 let belongs_to = end_point.belongs_to;
                 let method = fwd_cfg.get_method_by_index(belongs_to);
@@ -533,14 +580,18 @@ impl AnalysisCallbacks {
                     .filter_map(|disambiguated_def_path_data| {
                         if let DefPathData::TypeNs(symbol) = disambiguated_def_path_data.data {
                             Some(symbol.to_string())
+                            //Some(symbol.as_str())
                         } else {
                             None
                         }
                     })
-                    .collect::<Vec<String>>();
+                    .collect::<Vec<_>>();
                 let VEC_ITER_NS_STRING = VEC_ITER_NS.iter().map(|s|{s.to_string()}).collect::<Vec<String>>();
                 let ITERABLE_MAPPING_ITER_NS_STRING = ITERABLE_MAPPING_ITER_NS.iter().map(|s|{s.to_string()}).collect::<Vec<String>>();
+                //println!("{:?}, {:?}, {:?}",def_path, VEC_ITER_NS_STRING, ITERABLE_MAPPING_ITER_NS_STRING);
+                
                 if def_path == VEC_ITER_NS_STRING || def_path == ITERABLE_MAPPING_ITER_NS_STRING { // ??????????????????????????-------------------------
+                //if def_path == VEC_ITER_NS|| def_path == ITERABLE_MAPPING_ITER_NS { // ??????????????????????????-------------------------
                     return false;
                 }
 
@@ -815,7 +866,7 @@ impl AnalysisCallbacks {
             .collect::<Vec<_>>();
         debug_assert!(constructor.len() == 1);
         let constructor = constructor[0];
-        self.analyze_uninitialized_states(tcx, constructor, &fwd_cfg, storage_ty, compiler);
+        self.analyze_uninitialized_states(tcx, constructor, &fwd_cfg, storage_ty, compiler);//
 
         let (mut_methods, imm_methods): (Vec<_>, Vec<_>) = entry_points
             .iter()
@@ -832,8 +883,8 @@ impl AnalysisCallbacks {
                     Either::Right(i)
                 }
             });
-        self.detect_mutable_invocations(tcx, &fwd_cfg, imm_methods, &external_methods, compiler);
-        self.analyze_conflict_fields(&mut_methods, &external_methods, tcx, &fwd_cfg, storage_ty);
+        self.detect_mutable_invocations(tcx, &fwd_cfg, imm_methods, &external_methods, compiler);//
+        self.analyze_conflict_fields(&mut_methods, &external_methods, tcx, &fwd_cfg, storage_ty);//
     }
 
     fn collect_method_attrs<'tcx>(
