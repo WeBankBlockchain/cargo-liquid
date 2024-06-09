@@ -192,7 +192,12 @@ fn build_cargo_project(
     if let Ok(ref old_flags) = old_flags {
         env::set_var(
             RUSTFLAGS_ENV_VAR,
-            [old_flags, "-C link-arg=-z -C link-arg=stack-size=65536"].join(" "),
+            [
+                old_flags,
+                // add -C target-cpu=mvp try to fix https://github.com/rust-lang/rust/issues/109807
+                "-C target-feature=-sign-ext -C target-cpu=mvp -C link-arg=-z -C link-arg=stack-size=65536",
+            ]
+            .join(" "),
         );
     }
 
@@ -284,28 +289,31 @@ fn strip_custom_sections(module: &mut Module) {
 /// succeed, and the user will be encouraged to install it for further optimizations.
 fn optimize_wasm(crate_metadata: &CrateMetadata) -> Result<()> {
     // Deserialize wasm module from a file.
-    let mut module =
-        parity_wasm::deserialize_file(&crate_metadata.original_wasm).context(format!(
-            "Loading original wasm file '{}'",
-            crate_metadata.original_wasm.display()
-        ))?;
+    // print!("crate_metadata.original_wasm: {:?}", crate_metadata.original_wasm);
+    // print!("crate_metadata.dest_wasm: {:?}", crate_metadata.dest_wasm);
+    // let mut module =
+    //     parity_wasm::deserialize_file(&crate_metadata.original_wasm).context(format!(
+    //         "Loading original wasm file '{}'",
+    //         crate_metadata.original_wasm.display()
+    //     ))?;
 
-    // Perform optimization.
-    //
-    // In practice only tree-shaking is performed, i.e transitively removing all symbols that are
-    // NOT used by the specified entry points.
-    if pwasm_utils::optimize(
-        &mut module,
-        ["main", "deploy", "memory", "hash_type"].to_vec(),
-    )
-    .is_err()
-    {
-        anyhow::bail!("Optimizer failed");
-    }
-    strip_custom_sections(&mut module);
+    // // Perform optimization.
+    // //
+    // // In practice only tree-shaking is performed, i.e transitively removing all symbols that are
+    // // NOT used by the specified entry points.
+    // if pwasm_utils::optimize(
+    //     &mut module,
+    //     ["main", "deploy", "memory", "hash_type"].to_vec(),
+    // )
+    // .is_err()
+    // {
+    //     anyhow::bail!("Optimizer failed");
+    // }
+    // strip_custom_sections(&mut module);
 
-    parity_wasm::serialize_to_file(&crate_metadata.dest_wasm, module)?;
+    // parity_wasm::serialize_to_file(&crate_metadata.dest_wasm, module)?;
 
+    fs::copy(&crate_metadata.original_wasm, &crate_metadata.dest_wasm)?;
     // check `wasm-opt` installed
     if which::which("wasm-opt").is_err() {
         eprintln!(
@@ -323,6 +331,7 @@ fn optimize_wasm(crate_metadata: &CrateMetadata) -> Result<()> {
 
     let output = Command::new("wasm-opt")
         .arg(crate_metadata.dest_wasm.as_os_str())
+        .arg("--signext-lowering")
         .arg("-g")
         .arg("-O3") // execute -O3 optimization passes (spends potentially a lot of time optimizing)
         .arg("-o")
