@@ -19,10 +19,12 @@ jobs:
       - name: install rust nightly
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2021-06-23
+          toolchain: nightly-2024-02-25
           components: rustc-dev, rust-src, llvm-tools-preview
       - name: install cargo-liquid
         run: cargo install --path . --force
+      - name: install wasm-opt
+        run: cargo install wasm-opt --force
       - name: compile test contract
         run: cd .\tests\conflict_analysis_test\contract && cargo liquid build
       - name: setup python
